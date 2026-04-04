@@ -1,0 +1,24 @@
+__pycache__/
+  *.pyc
+  *.pyo
+  *.pyd
+
+  .idea/
+  .vscode/
+
+  output/
+  data/
+  cache/
+  ckpt/
+  ckpt_backup/
+  tensorboard/
+  *.pth
+  *.pt
+  *.ckpt
+  *.log
+  *.pkl
+  *.npz
+
+  dist/
+  build/
+
