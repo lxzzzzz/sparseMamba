@@ -1,5 +1,5 @@
 DATASET: 'KittiDataset'
-DATA_PATH: '/root/sparseMamba/data/dair_v2x'
+DATA_PATH: '/root/autodl-tmp/sparseMamba/data/dair_v2x'
 
 # 100 m training range for roadside perception.
 POINT_CLOUD_RANGE: [0, -51.2, -5, 102.4, 51.2, 3]

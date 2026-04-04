@@ -1,5 +1,5 @@
 DATASET: 'KittiDataset'
-DATA_PATH: '/root/sparseMamba/data/dair_v2x'
+DATA_PATH: '/root/autodl-tmp/sparseMamba/data/dair_v2x'
 
 # 200 m training range. 204.8 m is used so the x-range aligns with
 # the voxel size 0.16 and produces a cleaner sparse grid.
