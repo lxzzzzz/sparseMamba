@@ -1,24 +1,39 @@
 __pycache__/
-  *.pyc
-  *.pyo
-  *.pyd
+*.pyc
+*.pyo
+*.pyd
 
-  .idea/
-  .vscode/
+.idea/
+.vscode/
 
-  output/
-  data/
-  cache/
-  ckpt/
-  ckpt_backup/
-  tensorboard/
-  *.pth
-  *.pt
-  *.ckpt
-  *.log
-  *.pkl
-  *.npz
+.DS_Store
 
-  dist/
-  build/
+output/
+data/
+cache/
+ckpt/
+ckpt_backup/
+tensorboard/
+runs/
+wandb/
 
+*.pth
+*.pt
+*.ckpt
+*.onnx
+*.engine
+*.log
+*.out
+*.err
+*.pkl
+*.pickle
+*.npz
+*.npy
+
+dist/
+build/
+*.egg-info/
+
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
