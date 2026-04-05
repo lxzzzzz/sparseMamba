@@ -6,6 +6,7 @@ from pathlib import Path
 import torch
 from torch.utils.data import DataLoader
 from tensorboardX import SummaryWriter
+from tqdm import tqdm
 
 from pcdet.config import cfg, cfg_from_list, cfg_from_yaml_file, log_config_to_file
 from pcdet.tracking.datasets import TrackingDataset, collate_tracking_batch
@@ -65,7 +66,8 @@ def evaluate_epoch(model, dataloader, device):
     total_steps = 0
     total_tb = {}
     with torch.no_grad():
-        for batch in dataloader:
+        progress_bar = tqdm(dataloader, desc='val', leave=False)
+        for batch in progress_bar:
             batch = move_batch_to_device(batch, device)
             outputs = model(batch)
             loss, tb_dict = model.get_loss(batch, outputs)
@@ -73,6 +75,7 @@ def evaluate_epoch(model, dataloader, device):
             total_steps += 1
             for key, value in tb_dict.items():
                 total_tb[key] = total_tb.get(key, 0.0) + float(value)
+            progress_bar.set_postfix(loss=f'{loss.item():.4f}')
 
     avg_steps = max(total_steps, 1)
     avg_tb = {key: value / avg_steps for key, value in total_tb.items()}
@@ -148,7 +151,8 @@ def main():
         model.train()
         epoch_loss = 0.0
         epoch_tb = {}
-        for batch in train_loader:
+        progress_bar = tqdm(train_loader, desc=f'train {epoch + 1}/{epochs}', leave=False)
+        for batch in progress_bar:
             batch = move_batch_to_device(batch, device)
             optimizer.zero_grad()
             outputs = model(batch)
@@ -158,6 +162,7 @@ def main():
             epoch_loss += float(loss.item())
             for key, value in tb_dict.items():
                 epoch_tb[key] = epoch_tb.get(key, 0.0) + float(value)
+            progress_bar.set_postfix(loss=f'{loss.item():.4f}')
 
         scheduler.step()
         avg_train_loss = epoch_loss / max(len(train_loader), 1)
