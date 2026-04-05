@@ -31,7 +31,7 @@ class TrackingDataset(Dataset):
         self.training = training
         self.mode = 'train' if training else 'test'
         self.root_path = Path(dataset_cfg.ROOT_DIR)
-        self.cache_root = Path(dataset_cfg.CACHE_DIR)
+        self.cache_root = self._resolve_cache_root(dataset_cfg, self.mode)
         self.history_len = int(dataset_cfg.get('HISTORY_LEN', 8))
         self.match_iou = float(dataset_cfg.get('DET_GT_MATCH_IOU', 0.1))
         self.min_track_history = int(dataset_cfg.get('MIN_TRACK_HISTORY', 1))
@@ -56,6 +56,16 @@ class TrackingDataset(Dataset):
 
         self._frame_cache = {}
         self._obs_cache = {}
+
+    @staticmethod
+    def _resolve_cache_root(dataset_cfg, mode):
+        if mode == 'train' and 'TRAIN_CACHE_DIR' in dataset_cfg:
+            return Path(dataset_cfg.TRAIN_CACHE_DIR)
+        if mode == 'test' and 'VAL_CACHE_DIR' in dataset_cfg:
+            return Path(dataset_cfg.VAL_CACHE_DIR)
+        if 'CACHE_DIR' in dataset_cfg:
+            return Path(dataset_cfg.CACHE_DIR)
+        raise KeyError('Expected CACHE_DIR or split-specific TRAIN_CACHE_DIR / VAL_CACHE_DIR in tracking config')
 
     def __len__(self):
         return len(self.samples)

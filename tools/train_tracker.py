@@ -88,6 +88,8 @@ def main():
     logger = common_utils.create_logger(log_file)
     logger.info('Start tracker training')
     log_config_to_file(cfg, logger=logger)
+    logger.info('Train cache dir: %s', cfg.DATA_CONFIG.get('TRAIN_CACHE_DIR', cfg.DATA_CONFIG.get('CACHE_DIR', '')))
+    logger.info('Val cache dir: %s', cfg.DATA_CONFIG.get('VAL_CACHE_DIR', cfg.DATA_CONFIG.get('CACHE_DIR', '')))
 
     train_set = TrackingDataset(cfg.DATA_CONFIG, cfg.CLASS_NAMES, training=True)
     train_loader = DataLoader(

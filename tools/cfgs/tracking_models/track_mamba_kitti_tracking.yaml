@@ -2,7 +2,9 @@ CLASS_NAMES: ['Car', 'Pedestrian', 'Cyclist']
 
 DATA_CONFIG:
     ROOT_DIR: '/media/lx/LY/Roadside/V2X-Seq-train_val/kitti_tracking'
-    CACHE_DIR: '/media/lx/LY/Roadside/V2X-Seq-train_val/kitti_tracking/cache/default'
+    TRAIN_CACHE_DIR: '/media/lx/LY/Roadside/V2X-Seq-train_val/kitti_tracking/cache/train_cache'
+    VAL_CACHE_DIR: '/media/lx/LY/Roadside/V2X-Seq-train_val/kitti_tracking/cache/val_cache'
+    CACHE_DIR: '/media/lx/LY/Roadside/V2X-Seq-train_val/kitti_tracking/cache/val_cache'
     INFO_PATH: {
         'train': [tracking_infos_train.pkl],
         'test': [tracking_infos_val.pkl],

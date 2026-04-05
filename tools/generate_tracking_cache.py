@@ -20,6 +20,13 @@ def parse_config():
     parser.add_argument('--data_cfg', type=str, required=True, help='tracking frame dataset yaml')
     parser.add_argument('--ckpt', type=str, required=True, help='detector checkpoint')
     parser.add_argument('--save_dir', type=str, required=True, help='cache output root')
+    parser.add_argument(
+        '--split',
+        type=str,
+        default='val',
+        choices=['train', 'val', 'test'],
+        help='which tracking info split to run detector inference on',
+    )
     parser.add_argument('--batch_size', type=int, default=1, help='batch size')
     parser.add_argument('--workers', type=int, default=2, help='dataloader workers')
     return parser.parse_args()
@@ -31,10 +38,24 @@ def load_cfg(cfg_file):
     return cfg
 
 
+def configure_data_cfg_for_split(data_cfg, split):
+    if 'INFO_PATH' not in data_cfg or split not in data_cfg.INFO_PATH:
+        raise KeyError(f'Split "{split}" is not present in INFO_PATH')
+    if 'DATA_SPLIT' not in data_cfg or split not in data_cfg.DATA_SPLIT:
+        raise KeyError(f'Split "{split}" is not present in DATA_SPLIT')
+
+    # Cache generation always uses inference mode (training=False), which maps
+    # datasets to their "test" branch. Redirect that branch to the requested split.
+    data_cfg.INFO_PATH['test'] = list(data_cfg.INFO_PATH[split])
+    data_cfg.DATA_SPLIT['test'] = data_cfg.DATA_SPLIT[split]
+    return data_cfg
+
+
 def main():
     args = parse_config()
     detector_cfg = load_cfg(args.detector_cfg)
     data_cfg = load_cfg(args.data_cfg)
+    data_cfg = configure_data_cfg_for_split(data_cfg, args.split)
     detector_cfg.DATA_CONFIG = data_cfg
     detector_cfg.TAG = Path(args.detector_cfg).stem
 
@@ -44,6 +65,7 @@ def main():
     log_file = save_dir / f'generate_cache_{datetime.datetime.now().strftime("%Y%m%d-%H%M%S")}.log'
     logger = common_utils.create_logger(log_file)
     log_config_to_file(detector_cfg, logger=logger)
+    logger.info('Cache generation split: %s', args.split)
 
     dataset, dataloader, _ = build_dataloader(
         dataset_cfg=detector_cfg.DATA_CONFIG,

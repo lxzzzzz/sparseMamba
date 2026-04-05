@@ -55,6 +55,12 @@ def class_names_to_labels(class_names, names):
     return np.asarray([name_to_label.get(name, -1) for name in names], dtype=np.int64)
 
 
+def resolve_eval_cache_dir(data_cfg):
+    if 'VAL_CACHE_DIR' in data_cfg:
+        return data_cfg.VAL_CACHE_DIR
+    return data_cfg.CACHE_DIR
+
+
 def main():
     args, cfg = parse_config()
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -73,6 +79,7 @@ def main():
 
     tracker_cfg = dict(cfg.TRACKER)
     tracker_cfg['HISTORY_LEN'] = int(cfg.DATA_CONFIG.get('HISTORY_LEN', 8))
+    cache_dir = resolve_eval_cache_dir(cfg.DATA_CONFIG)
 
     data_root = Path(cfg.DATA_CONFIG.ROOT_DIR)
     info_file = data_root / cfg.DATA_CONFIG.INFO_PATH['test'][0]
@@ -92,7 +99,7 @@ def main():
         seq_results = []
 
         for info in infos:
-            frame_cache = load_frame_cache(cfg.DATA_CONFIG.CACHE_DIR, sequence_id, info['frame_idx'])
+            frame_cache = load_frame_cache(cache_dir, sequence_id, info['frame_idx'])
             outputs = tracker.update(frame_cache)
             seq_results.append({
                 'frame_idx': int(info['frame_idx']),
