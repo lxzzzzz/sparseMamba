@@ -26,6 +26,8 @@ def load_data_to_gpu(batch_dict):
             batch_dict[key] = val.cuda()
         elif not isinstance(val, np.ndarray):
             continue
+        elif val.dtype.kind in ['U', 'S', 'O']:
+            continue
         elif key in ['frame_id', 'metadata', 'calib', 'image_paths','ori_shape','img_process_infos']:
             continue
         elif key in ['images']:
