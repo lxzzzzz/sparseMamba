@@ -125,6 +125,37 @@ def main():
         pickle.dump(results, f)
 
     logger.info('Tracking metrics: %s', metric_dict)
+    logger.info(
+        'Summary | MOTA=%.4f IDF1=%.4f HOTA=%.4f DetA=%.4f AssA=%.4f '
+        'Pr=%.4f Re=%.4f IDSW=%d MT=%d PT=%d ML=%d Frag=%d',
+        metric_dict.get('mota', 0.0),
+        metric_dict.get('idf1', 0.0),
+        metric_dict.get('hota', 0.0),
+        metric_dict.get('deta', 0.0),
+        metric_dict.get('assa', 0.0),
+        metric_dict.get('precision', 0.0),
+        metric_dict.get('recall', 0.0),
+        metric_dict.get('id_switches', 0),
+        metric_dict.get('mostly_tracked', 0),
+        metric_dict.get('partially_tracked', 0),
+        metric_dict.get('mostly_lost', 0),
+        metric_dict.get('fragments', 0),
+    )
+    print(
+        'Summary | '
+        f"MOTA={metric_dict.get('mota', 0.0):.4f} "
+        f"IDF1={metric_dict.get('idf1', 0.0):.4f} "
+        f"HOTA={metric_dict.get('hota', 0.0):.4f} "
+        f"DetA={metric_dict.get('deta', 0.0):.4f} "
+        f"AssA={metric_dict.get('assa', 0.0):.4f} "
+        f"Pr={metric_dict.get('precision', 0.0):.4f} "
+        f"Re={metric_dict.get('recall', 0.0):.4f} "
+        f"IDSW={metric_dict.get('id_switches', 0)} "
+        f"MT={metric_dict.get('mostly_tracked', 0)} "
+        f"PT={metric_dict.get('partially_tracked', 0)} "
+        f"ML={metric_dict.get('mostly_lost', 0)} "
+        f"Frag={metric_dict.get('fragments', 0)}"
+    )
 
 
 if __name__ == '__main__':

@@ -63,14 +63,21 @@ def evaluate_epoch(model, dataloader, device):
     model.eval()
     total_loss = 0.0
     total_steps = 0
+    total_tb = {}
     with torch.no_grad():
         for batch in dataloader:
             batch = move_batch_to_device(batch, device)
             outputs = model(batch)
-            loss, _ = model.get_loss(batch, outputs)
+            loss, tb_dict = model.get_loss(batch, outputs)
             total_loss += float(loss.item())
             total_steps += 1
-    return total_loss / max(total_steps, 1)
+            for key, value in tb_dict.items():
+                total_tb[key] = total_tb.get(key, 0.0) + float(value)
+
+    avg_steps = max(total_steps, 1)
+    avg_tb = {key: value / avg_steps for key, value in total_tb.items()}
+    avg_tb['loss'] = total_loss / avg_steps
+    return avg_tb
 
 
 def main():
@@ -155,15 +162,34 @@ def main():
         scheduler.step()
         avg_train_loss = epoch_loss / max(len(train_loader), 1)
         tb_log.add_scalar('train/loss', avg_train_loss, epoch)
+        avg_train_tb = {key: value / max(len(train_loader), 1) for key, value in epoch_tb.items()}
         for key, value in epoch_tb.items():
             tb_log.add_scalar(f'train/{key}', value / max(len(train_loader), 1), epoch)
-        logger.info('Epoch %d train_loss=%.6f', epoch, avg_train_loss)
+        logger.info(
+            'Epoch %d train_loss=%.6f assoc=%.6f recovery=%.6f survival=%.6f motion=%.6f',
+            epoch,
+            avg_train_loss,
+            avg_train_tb.get('loss_assoc', 0.0),
+            avg_train_tb.get('loss_recovery', 0.0),
+            avg_train_tb.get('loss_survival', 0.0),
+            avg_train_tb.get('loss_motion', 0.0),
+        )
 
         val_loss = None
         if val_loader is not None:
-            val_loss = evaluate_epoch(model, val_loader, device)
-            tb_log.add_scalar('val/loss', val_loss, epoch)
-            logger.info('Epoch %d val_loss=%.6f', epoch, val_loss)
+            val_metrics = evaluate_epoch(model, val_loader, device)
+            val_loss = val_metrics['loss']
+            for key, value in val_metrics.items():
+                tb_log.add_scalar(f'val/{key}', value, epoch)
+            logger.info(
+                'Epoch %d val_loss=%.6f assoc=%.6f recovery=%.6f survival=%.6f motion=%.6f',
+                epoch,
+                val_metrics['loss'],
+                val_metrics.get('loss_assoc', 0.0),
+                val_metrics.get('loss_recovery', 0.0),
+                val_metrics.get('loss_survival', 0.0),
+                val_metrics.get('loss_motion', 0.0),
+            )
 
         ckpt_path = ckpt_dir / f'checkpoint_epoch_{epoch + 1}.pth'
         torch.save({
