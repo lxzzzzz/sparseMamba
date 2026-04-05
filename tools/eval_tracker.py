@@ -8,6 +8,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
+from tqdm import tqdm
 
 from pcdet.config import cfg, cfg_from_list, cfg_from_yaml_file, log_config_to_file
 from pcdet.tracking.cache import load_frame_cache
@@ -98,7 +99,8 @@ def main():
         tracker = OnlineTracker(model, tracker_cfg, cfg.CLASS_NAMES, device)
         seq_results = []
 
-        for info in infos:
+        progress_bar = tqdm(infos, desc=f'eval {sequence_id}', leave=True)
+        for info in progress_bar:
             frame_cache = load_frame_cache(cache_dir, sequence_id, info['frame_idx'])
             outputs = tracker.update(frame_cache)
             seq_results.append({
@@ -115,6 +117,7 @@ def main():
             pred_ids = np.asarray([item['track_id'] for item in outputs], dtype=np.int64)
             pred_labels = np.asarray([item['pred_label'] for item in outputs], dtype=np.int64)
             metrics.update(sequence_id, gt_boxes, gt_ids, gt_labels, pred_boxes, pred_ids, pred_labels)
+            progress_bar.set_postfix(tracks=len(outputs))
 
         results[sequence_id] = seq_results
 

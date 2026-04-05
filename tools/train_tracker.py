@@ -66,7 +66,7 @@ def evaluate_epoch(model, dataloader, device):
     total_steps = 0
     total_tb = {}
     with torch.no_grad():
-        progress_bar = tqdm(dataloader, desc='val', leave=False)
+        progress_bar = tqdm(dataloader, desc='val', leave=True)
         for batch in progress_bar:
             batch = move_batch_to_device(batch, device)
             outputs = model(batch)
@@ -81,6 +81,21 @@ def evaluate_epoch(model, dataloader, device):
     avg_tb = {key: value / avg_steps for key, value in total_tb.items()}
     avg_tb['loss'] = total_loss / avg_steps
     return avg_tb
+
+
+def log_val_metrics(tb_log, logger, val_metrics, step, epoch, prefix='val'):
+    for key, value in val_metrics.items():
+        tb_log.add_scalar(f'{prefix}/{key}', value, step)
+    logger.info(
+        'Epoch %d %s_loss=%.6f assoc=%.6f recovery=%.6f survival=%.6f motion=%.6f',
+        epoch,
+        prefix,
+        val_metrics['loss'],
+        val_metrics.get('loss_assoc', 0.0),
+        val_metrics.get('loss_recovery', 0.0),
+        val_metrics.get('loss_survival', 0.0),
+        val_metrics.get('loss_motion', 0.0),
+    )
 
 
 def main():
@@ -137,12 +152,14 @@ def main():
 
     start_epoch = 0
     best_val = float('inf')
+    global_step = 0
     if args.ckpt is not None:
         checkpoint = torch.load(args.ckpt, map_location=device)
         model.load_state_dict(checkpoint['model_state'])
         optimizer.load_state_dict(checkpoint['optimizer_state'])
         start_epoch = int(checkpoint.get('epoch', 0)) + 1
         best_val = float(checkpoint.get('best_val', best_val))
+        global_step = int(checkpoint.get('global_step', 0))
         logger.info('Resumed from %s', args.ckpt)
 
     tb_log = SummaryWriter(log_dir=str(output_dir / 'tensorboard'))
@@ -151,7 +168,7 @@ def main():
         model.train()
         epoch_loss = 0.0
         epoch_tb = {}
-        progress_bar = tqdm(train_loader, desc=f'train {epoch + 1}/{epochs}', leave=False)
+        progress_bar = tqdm(train_loader, desc=f'train {epoch + 1}/{epochs}', leave=True)
         for batch in progress_bar:
             batch = move_batch_to_device(batch, device)
             optimizer.zero_grad()
@@ -159,6 +176,7 @@ def main():
             loss, tb_dict = model.get_loss(batch, outputs)
             loss.backward()
             optimizer.step()
+            global_step += 1
             epoch_loss += float(loss.item())
             for key, value in tb_dict.items():
                 epoch_tb[key] = epoch_tb.get(key, 0.0) + float(value)
@@ -166,10 +184,10 @@ def main():
 
         scheduler.step()
         avg_train_loss = epoch_loss / max(len(train_loader), 1)
-        tb_log.add_scalar('train/loss', avg_train_loss, epoch)
+        tb_log.add_scalar('train/loss', avg_train_loss, global_step)
         avg_train_tb = {key: value / max(len(train_loader), 1) for key, value in epoch_tb.items()}
         for key, value in epoch_tb.items():
-            tb_log.add_scalar(f'train/{key}', value / max(len(train_loader), 1), epoch)
+            tb_log.add_scalar(f'train/{key}', value / max(len(train_loader), 1), global_step)
         logger.info(
             'Epoch %d train_loss=%.6f assoc=%.6f recovery=%.6f survival=%.6f motion=%.6f',
             epoch,
@@ -184,21 +202,12 @@ def main():
         if val_loader is not None:
             val_metrics = evaluate_epoch(model, val_loader, device)
             val_loss = val_metrics['loss']
-            for key, value in val_metrics.items():
-                tb_log.add_scalar(f'val/{key}', value, epoch)
-            logger.info(
-                'Epoch %d val_loss=%.6f assoc=%.6f recovery=%.6f survival=%.6f motion=%.6f',
-                epoch,
-                val_metrics['loss'],
-                val_metrics.get('loss_assoc', 0.0),
-                val_metrics.get('loss_recovery', 0.0),
-                val_metrics.get('loss_survival', 0.0),
-                val_metrics.get('loss_motion', 0.0),
-            )
+            log_val_metrics(tb_log, logger, val_metrics, global_step, epoch, prefix='val')
 
         ckpt_path = ckpt_dir / f'checkpoint_epoch_{epoch + 1}.pth'
         torch.save({
             'epoch': epoch,
+            'global_step': global_step,
             'model_state': model.state_dict(),
             'optimizer_state': optimizer.state_dict(),
             'best_val': best_val if val_loss is None else min(best_val, val_loss),
@@ -208,6 +217,7 @@ def main():
             best_val = val_loss
             torch.save({
                 'epoch': epoch,
+                'global_step': global_step,
                 'model_state': model.state_dict(),
                 'optimizer_state': optimizer.state_dict(),
                 'best_val': best_val,

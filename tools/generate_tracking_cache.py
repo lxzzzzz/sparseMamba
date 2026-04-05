@@ -6,6 +6,7 @@ from pathlib import Path
 import yaml
 import torch
 from easydict import EasyDict
+from tqdm import tqdm
 
 from pcdet.config import cfg_from_yaml_file, log_config_to_file
 from pcdet.datasets import build_dataloader
@@ -95,7 +96,8 @@ def main():
 
     cache_index = []
     with torch.no_grad():
-        for batch_dict in dataloader:
+        progress_bar = tqdm(dataloader, desc=f'cache {args.split}', leave=True)
+        for batch_dict in progress_bar:
             sequence_ids = [str(item) for item in batch_dict['sequence_id']]
             frame_ids = [str(item) for item in batch_dict['frame_id']]
             frame_indices = [int(item) for item in batch_dict['frame_idx']]
@@ -124,6 +126,7 @@ def main():
                     'frame_idx': frame_cache['frame_idx'],
                     'cache_path': str(rel_path),
                 })
+            progress_bar.set_postfix(frames=len(cache_index))
 
     save_cache_index(save_dir, cache_index)
     logger.info('Saved %d cached frames into %s', len(cache_index), save_dir)
