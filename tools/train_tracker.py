@@ -19,6 +19,7 @@ def parse_config():
     parser.add_argument('--cfg_file', type=str, required=True, help='tracking config file')
     parser.add_argument('--batch_size', type=int, default=None, help='batch size')
     parser.add_argument('--epochs', type=int, default=None, help='num epochs')
+    parser.add_argument('--val_every_epochs', type=int, default=1, help='run validation every N epochs')
     parser.add_argument('--workers', type=int, default=4, help='workers')
     parser.add_argument('--extra_tag', type=str, default='default', help='run tag')
     parser.add_argument('--ckpt', type=str, default=None, help='resume checkpoint')
@@ -103,6 +104,7 @@ def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     batch_size = args.batch_size or cfg.OPTIMIZATION.BATCH_SIZE_PER_GPU
     epochs = args.epochs or cfg.OPTIMIZATION.NUM_EPOCHS
+    val_every_epochs = max(int(args.val_every_epochs), 1)
 
     output_dir = cfg.ROOT_DIR / 'output' / cfg.EXP_GROUP_PATH / cfg.TAG / args.extra_tag
     ckpt_dir = output_dir / 'ckpt'
@@ -199,7 +201,8 @@ def main():
         )
 
         val_loss = None
-        if val_loader is not None:
+        should_validate = ((epoch - start_epoch + 1) % val_every_epochs == 0) or (epoch == epochs - 1)
+        if val_loader is not None and should_validate:
             val_metrics = evaluate_epoch(model, val_loader, device)
             val_loss = val_metrics['loss']
             log_val_metrics(tb_log, logger, val_metrics, global_step, epoch, prefix='val')
