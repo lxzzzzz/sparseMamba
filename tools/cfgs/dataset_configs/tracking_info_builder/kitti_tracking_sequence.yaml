@@ -1,0 +1,30 @@
+IMAGESETS_DIR: ImageSets
+SPLIT_ENTRY_MODE: sequence
+ENTRY_SEPARATOR: /
+
+POINT_FEATURES: 4
+POINT_CLOUD_SUFFIX: .bin
+IMAGE_SUFFIXES: [.png, .jpg, .jpeg]
+LABEL_FORMAT: kitti_tracking_sequence
+
+PATHS:
+    POINT_CLOUD_DIR_CANDIDATES:
+        - training/velodyne
+        - testing/velodyne
+    IMAGE_DIR_CANDIDATES:
+        - training/image_02
+        - training/image_2
+        - testing/image_02
+        - testing/image_2
+    CALIB_DIR_CANDIDATES:
+        - training/calib
+        - testing/calib
+    LABEL_DIR_CANDIDATES:
+        - training/label_02
+        - training/label_2
+
+LAYOUT:
+    POINT_CLOUD: sequence_frame
+    IMAGE: sequence_frame
+    CALIB: sequence_file
+    LABEL: sequence_file
