@@ -38,16 +38,27 @@ def load_cfg(cfg_file):
     return cfg
 
 
+def resolve_cfg_split_key(data_cfg, split):
+    if 'INFO_PATH' not in data_cfg or 'DATA_SPLIT' not in data_cfg:
+        raise KeyError('Data config must contain INFO_PATH and DATA_SPLIT')
+
+    if split in data_cfg.INFO_PATH and split in data_cfg.DATA_SPLIT:
+        return split
+
+    for cfg_key, split_name in data_cfg.DATA_SPLIT.items():
+        if str(split_name) == split and cfg_key in data_cfg.INFO_PATH:
+            return cfg_key
+
+    raise KeyError(f'Split "{split}" is not present in INFO_PATH / DATA_SPLIT')
+
+
 def configure_data_cfg_for_split(data_cfg, split):
-    if 'INFO_PATH' not in data_cfg or split not in data_cfg.INFO_PATH:
-        raise KeyError(f'Split "{split}" is not present in INFO_PATH')
-    if 'DATA_SPLIT' not in data_cfg or split not in data_cfg.DATA_SPLIT:
-        raise KeyError(f'Split "{split}" is not present in DATA_SPLIT')
+    cfg_split_key = resolve_cfg_split_key(data_cfg, split)
 
     # Cache generation always uses inference mode (training=False), which maps
     # datasets to their "test" branch. Redirect that branch to the requested split.
-    data_cfg.INFO_PATH['test'] = list(data_cfg.INFO_PATH[split])
-    data_cfg.DATA_SPLIT['test'] = data_cfg.DATA_SPLIT[split]
+    data_cfg.INFO_PATH['test'] = list(data_cfg.INFO_PATH[cfg_split_key])
+    data_cfg.DATA_SPLIT['test'] = data_cfg.DATA_SPLIT[cfg_split_key]
     return data_cfg
 
 
