@@ -241,6 +241,31 @@ def main():
     elapsed = max(time.perf_counter() - start_time, 1e-6)
     metric_dict['fps'] = float(total_frames / elapsed)
     metric_dict['max_distance'] = None if args.max_distance is None else float(args.max_distance)
+    metric_dict['num_frames'] = int(total_frames)
+    metric_dict['num_sequences'] = int(len(sequence_to_infos))
+    metric_dict['MOTA'] = metric_dict.get('mota', 0.0)
+    metric_dict['MOTP'] = metric_dict.get('motp', 0.0)
+    metric_dict['Rcll'] = metric_dict.get('recall', 0.0)
+    metric_dict['Prcn'] = metric_dict.get('precision', 0.0)
+    metric_dict['MT'] = metric_dict.get('mostly_tracked', 0)
+    metric_dict['PT'] = metric_dict.get('partially_tracked', 0)
+    metric_dict['ML'] = metric_dict.get('mostly_lost', 0)
+    metric_dict['FP'] = metric_dict.get('fp', 0)
+    metric_dict['FN'] = metric_dict.get('fn', 0)
+    metric_dict['IDsw'] = metric_dict.get('id_switches', 0)
+    metric_dict['Frag'] = metric_dict.get('fragments', 0)
+    metric_dict['TP'] = metric_dict.get('tp', 0)
+    metric_dict['IDF1'] = metric_dict.get('idf1', 0.0)
+    metric_dict['IDP'] = metric_dict.get('id_precision', 0.0)
+    metric_dict['IDR'] = metric_dict.get('id_recall', 0.0)
+    metric_dict['HOTA'] = metric_dict.get('hota', 0.0)
+    metric_dict['DetA'] = metric_dict.get('deta', 0.0)
+    metric_dict['AssA'] = metric_dict.get('assa', 0.0)
+    metric_dict['DetPr'] = metric_dict.get('detpr', 0.0)
+    metric_dict['DetRe'] = metric_dict.get('detre', 0.0)
+    metric_dict['AssPr'] = metric_dict.get('asspr', 0.0)
+    metric_dict['AssRe'] = metric_dict.get('assre', 0.0)
+    metric_dict['FPS'] = metric_dict.get('fps', 0.0)
     with open(save_dir / 'ab3dmot_baseline_metrics.json', 'w') as f:
         json.dump(metric_dict, f, indent=2)
     with open(save_dir / 'ab3dmot_baseline_results.pkl', 'wb') as f:
@@ -268,6 +293,23 @@ def main():
         f"IDsw={metric_dict.get('id_switches', 0)} "
         f"Frag={metric_dict.get('fragments', 0)} "
         f"FPS={metric_dict.get('fps', 0.0):.2f}"
+    )
+    print(
+        'Extended | '
+        f"HOTA={metric_dict.get('hota', 0.0):.4f} "
+        f"DetA={metric_dict.get('deta', 0.0):.4f} "
+        f"AssA={metric_dict.get('assa', 0.0):.4f} "
+        f"IDF1={metric_dict.get('idf1', 0.0):.4f} "
+        f"IDP={metric_dict.get('id_precision', 0.0):.4f} "
+        f"IDR={metric_dict.get('id_recall', 0.0):.4f} "
+        f"DetPr={metric_dict.get('detpr', 0.0):.4f} "
+        f"DetRe={metric_dict.get('detre', 0.0):.4f} "
+        f"AssPr={metric_dict.get('asspr', 0.0):.4f} "
+        f"AssRe={metric_dict.get('assre', 0.0):.4f} "
+        f"TP={metric_dict.get('tp', 0)} "
+        f"PT={metric_dict.get('partially_tracked', 0)} "
+        f"Seq={metric_dict.get('num_sequences', 0)} "
+        f"Frames={metric_dict.get('num_frames', 0)}"
     )
 
 
