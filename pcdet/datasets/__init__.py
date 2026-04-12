@@ -15,6 +15,7 @@ from .once.once_dataset import ONCEDataset
 from .argo2.argo2_dataset import Argo2Dataset
 from .custom.custom_dataset import CustomDataset
 from .tracking.kitti_tracking_frame_dataset import KittiTrackingFrameDataset
+from .tracking.kitti_tracking_lidar_det_dataset import KittiTrackingLidarDetDataset
 
 __all__ = {
     'DatasetTemplate': DatasetTemplate,
@@ -27,6 +28,7 @@ __all__ = {
     'CustomDataset': CustomDataset,
     'Argo2Dataset': Argo2Dataset,
     'KittiTrackingFrameDataset': KittiTrackingFrameDataset,
+    'KittiTrackingLidarDetDataset': KittiTrackingLidarDetDataset,
 }
 
 
