@@ -13,6 +13,8 @@ class TrackingMetrics:
         self.false_positive = 0
         self.false_negative = 0
         self.id_switches = 0
+        self.matched_iou_sum = 0.0
+        self.matched_iou_count = 0
         self._gt_to_pred = {}
         self._seq_stats = defaultdict(lambda: {
             'gt_counts': defaultdict(int),
@@ -58,6 +60,8 @@ class TrackingMetrics:
             matched_gt.add(gt_idx)
             matched_pred.add(pred_idx)
             self.true_positive += 1
+            self.matched_iou_sum += float(iou[gt_idx, pred_idx])
+            self.matched_iou_count += 1
 
             gt_id = int(gt_ids[gt_idx])
             pred_id = int(pred_ids[pred_idx])
@@ -85,6 +89,7 @@ class TrackingMetrics:
         precision = self.true_positive / max(self.true_positive + self.false_positive, 1)
         recall = self.true_positive / max(self.total_gt, 1)
         mota = 1.0 - (self.false_positive + self.false_negative + self.id_switches) / max(self.total_gt, 1)
+        motp = self.matched_iou_sum / max(self.matched_iou_count, 1)
 
         idtp = 0
         idfp = 0
@@ -158,6 +163,7 @@ class TrackingMetrics:
             'precision': float(precision),
             'recall': float(recall),
             'mota': float(mota),
+            'motp': float(motp),
             'idtp': int(idtp),
             'idfp': int(idfp),
             'idfn': int(idfn),

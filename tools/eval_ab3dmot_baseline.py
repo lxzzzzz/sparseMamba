@@ -2,6 +2,7 @@ import _init_path
 import argparse
 import json
 import pickle
+import time
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
@@ -25,12 +26,13 @@ class TrackState:
 
 
 class AB3DMOTBaseline:
-    def __init__(self, max_age=2, min_hits=2, match_iou=0.1, score_thresh=0.1, center_gate=8.0):
+    def __init__(self, max_age=2, min_hits=2, match_iou=0.1, score_thresh=0.1, center_gate=8.0, max_distance=None):
         self.max_age = int(max_age)
         self.min_hits = int(min_hits)
         self.match_iou = float(match_iou)
         self.score_thresh = float(score_thresh)
         self.center_gate = float(center_gate)
+        self.max_distance = None if max_distance is None else float(max_distance)
         self.next_track_id = 1
         self.tracks = []
 
@@ -53,6 +55,13 @@ class AB3DMOTBaseline:
         valid = same_class & ((iou >= self.match_iou) | (center_dist <= self.center_gate))
         return valid
 
+    def _filter_det_by_distance(self, det_boxes, det_scores, det_labels):
+        if self.max_distance is None or det_boxes.shape[0] == 0:
+            return det_boxes, det_scores, det_labels
+        ranges = np.linalg.norm(det_boxes[:, 0:2], axis=1)
+        keep = ranges <= self.max_distance
+        return det_boxes[keep], det_scores[keep], det_labels[keep]
+
     def update(self, frame_cache):
         det_boxes = np.asarray(frame_cache.get('pred_boxes', []), dtype=np.float32).reshape(-1, 7)
         det_scores = np.asarray(frame_cache.get('pred_scores', []), dtype=np.float32).reshape(-1)
@@ -62,6 +71,7 @@ class AB3DMOTBaseline:
         det_boxes = det_boxes[keep]
         det_scores = det_scores[keep]
         det_labels = det_labels[keep]
+        det_boxes, det_scores, det_labels = self._filter_det_by_distance(det_boxes, det_scores, det_labels)
 
         for track in self.tracks:
             track.missed += 1
@@ -141,6 +151,7 @@ def parse_args():
     parser.add_argument('--center_gate', type=float, default=8.0)
     parser.add_argument('--max_age', type=int, default=2)
     parser.add_argument('--min_hits', type=int, default=2)
+    parser.add_argument('--max_distance', type=float, default=100.0, help='evaluate and track targets within XY range only')
     parser.add_argument('--save_dir', type=str, required=True, help='output dir for metrics and tracking results')
     return parser.parse_args()
 
@@ -153,6 +164,20 @@ def load_pickle(path):
 def class_names_to_labels(class_names, names):
     name_to_label = {name: idx + 1 for idx, name in enumerate(class_names)}
     return np.asarray([name_to_label.get(name, -1) for name in names], dtype=np.int64)
+
+
+def filter_boxes_by_distance(boxes, *extra_arrays, max_distance=None):
+    boxes = np.asarray(boxes, dtype=np.float32).reshape(-1, 7)
+    if max_distance is None or boxes.shape[0] == 0:
+        return (boxes, *extra_arrays)
+
+    ranges = np.linalg.norm(boxes[:, 0:2], axis=1)
+    keep = ranges <= float(max_distance)
+    filtered = [boxes[keep]]
+    for arr in extra_arrays:
+        arr = np.asarray(arr)
+        filtered.append(arr[keep])
+    return tuple(filtered)
 
 
 def main():
@@ -173,9 +198,12 @@ def main():
         match_iou=args.match_iou,
         score_thresh=args.score_thresh,
         center_gate=args.center_gate,
+        max_distance=args.max_distance,
     )
     metrics = TrackingMetrics(iou_threshold=args.match_iou)
     results = {}
+    total_frames = 0
+    start_time = time.perf_counter()
 
     for sequence_id, infos in sequence_to_infos.items():
         tracker.next_track_id = 1
@@ -183,6 +211,7 @@ def main():
         seq_results = []
 
         for info in infos:
+            total_frames += 1
             frame_cache = load_frame_cache(cache_dir, sequence_id, info['frame_idx'])
             outputs = tracker.update(frame_cache)
             seq_results.append({
@@ -194,15 +223,24 @@ def main():
             gt_boxes = np.asarray(gt_annos.get('gt_boxes_lidar', []), dtype=np.float32).reshape(-1, 7)
             gt_ids = np.asarray(gt_annos.get('track_id', []), dtype=np.int64)
             gt_labels = class_names_to_labels(args.class_names, gt_annos.get('name', []))
+            gt_boxes, gt_ids, gt_labels = filter_boxes_by_distance(
+                gt_boxes, gt_ids, gt_labels, max_distance=args.max_distance
+            )
 
             pred_boxes = np.asarray([item['pred_box'] for item in outputs], dtype=np.float32).reshape(-1, 7)
             pred_ids = np.asarray([item['track_id'] for item in outputs], dtype=np.int64)
             pred_labels = np.asarray([item['pred_label'] for item in outputs], dtype=np.int64)
+            pred_boxes, pred_ids, pred_labels = filter_boxes_by_distance(
+                pred_boxes, pred_ids, pred_labels, max_distance=args.max_distance
+            )
             metrics.update(sequence_id, gt_boxes, gt_ids, gt_labels, pred_boxes, pred_ids, pred_labels)
 
         results[sequence_id] = seq_results
 
     metric_dict = metrics.summary()
+    elapsed = max(time.perf_counter() - start_time, 1e-6)
+    metric_dict['fps'] = float(total_frames / elapsed)
+    metric_dict['max_distance'] = None if args.max_distance is None else float(args.max_distance)
     with open(save_dir / 'ab3dmot_baseline_metrics.json', 'w') as f:
         json.dump(metric_dict, f, indent=2)
     with open(save_dir / 'ab3dmot_baseline_results.pkl', 'wb') as f:
@@ -216,20 +254,20 @@ def main():
     print(f'center_gate: {args.center_gate}')
     print(f'max_age: {args.max_age}')
     print(f'min_hits: {args.min_hits}')
+    print(f'max_distance: {args.max_distance}')
     print(
         'Summary | '
         f"MOTA={metric_dict.get('mota', 0.0):.4f} "
-        f"IDF1={metric_dict.get('idf1', 0.0):.4f} "
-        f"HOTA={metric_dict.get('hota', 0.0):.4f} "
-        f"DetA={metric_dict.get('deta', 0.0):.4f} "
-        f"AssA={metric_dict.get('assa', 0.0):.4f} "
-        f"Pr={metric_dict.get('precision', 0.0):.4f} "
-        f"Re={metric_dict.get('recall', 0.0):.4f} "
-        f"IDSW={metric_dict.get('id_switches', 0)} "
+        f"MOTP={metric_dict.get('motp', 0.0):.4f} "
+        f"Rcll={metric_dict.get('recall', 0.0):.4f} "
+        f"Prcn={metric_dict.get('precision', 0.0):.4f} "
         f"MT={metric_dict.get('mostly_tracked', 0)} "
-        f"PT={metric_dict.get('partially_tracked', 0)} "
         f"ML={metric_dict.get('mostly_lost', 0)} "
-        f"Frag={metric_dict.get('fragments', 0)}"
+        f"FP={metric_dict.get('fp', 0)} "
+        f"FN={metric_dict.get('fn', 0)} "
+        f"IDsw={metric_dict.get('id_switches', 0)} "
+        f"Frag={metric_dict.get('fragments', 0)} "
+        f"FPS={metric_dict.get('fps', 0.0):.2f}"
     )
 
 
