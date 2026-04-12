@@ -6,9 +6,6 @@ from pathlib import Path
 import numpy as np
 from skimage import io
 
-from pcdet.datasets.kitti import kitti_utils
-from pcdet.utils import calibration_kitti
-
 from create_tracking_infos import (
     find_image_file,
     find_sequence_dir,
@@ -151,25 +148,20 @@ def build_annos_from_lidar_labels(frame_annos):
     alpha = np.asarray([anno['alpha'] for anno in frame_annos], dtype=np.float32)
     score = np.asarray([anno['score'] for anno in frame_annos], dtype=np.float32)
     gt_boxes_lidar = np.stack([anno['gt_boxes_lidar'] for anno in frame_annos], axis=0).astype(np.float32)
-
-    pseudo_annos = [{
-        'name': names.copy(),
-        'gt_boxes_lidar': gt_boxes_lidar.copy(),
-    }]
-    kitti_utils.transform_annotations_to_kitti_format(
-        pseudo_annos,
-        map_name_to_kitti={str(name): str(name) for name in np.unique(names).tolist()}
-    )
-    pseudo = pseudo_annos[0]
+    location = gt_boxes_lidar[:, 0:3].astype(np.float32)
+    dimensions = gt_boxes_lidar[:, 3:6].astype(np.float32)
+    rotation_z = gt_boxes_lidar[:, 6].astype(np.float32)
 
     return {
         'name': names,
         'track_id': track_ids,
         'bbox': bbox,
-        'dimensions': pseudo['dimensions'].astype(np.float32),
-        'location': pseudo['location'].astype(np.float32),
-        'rotation_y': pseudo['rotation_y'].astype(np.float32),
-        'alpha': alpha if alpha.shape[0] == gt_boxes_lidar.shape[0] else pseudo['alpha'].astype(np.float32),
+        'dimensions': dimensions,
+        'location': location,
+        # Keep the legacy key for downstream compatibility, but its value is lidar yaw.
+        'rotation_y': rotation_z,
+        'rotation_z': rotation_z,
+        'alpha': alpha,
         'score': score,
         'gt_boxes_lidar': gt_boxes_lidar,
     }
