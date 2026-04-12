@@ -120,7 +120,11 @@ python tools/create_tracking_infos.py \
   --format_cfg tools/cfgs/dataset_configs/tracking_info_builder/kitti_tracking_framewise.yaml
 ```
 
-固定 detector data config：
+如果只是为了给 tracker 生成 detector cache，且你使用的是纯雷达 detector，推荐直接使用 points-only detector data config：
+
+`tools/cfgs/dataset_configs/kitti_tracking_detector_lidar.yaml`
+
+如果你后面还要做图像融合 detector 推理，再改回：
 
 `tools/cfgs/dataset_configs/kitti_tracking_dataset.yaml`
 
@@ -133,10 +137,15 @@ python tools/create_tracking_infos.py \
 ```bash
 python tools/generate_tracking_cache.py \
   --detector_cfg <你的detector.yaml> \
-  --data_cfg tools/cfgs/dataset_configs/kitti_tracking_dataset.yaml \
+  --data_cfg tools/cfgs/dataset_configs/kitti_tracking_detector_lidar.yaml \
   --ckpt <你的detector.ckpt> \
   --save_dir /media/lx/LY/Roadside/V2X-Seq-train_val/kitti_tracking/cache/<cache_name>
 ```
+
+如果 detector 是纯雷达 `VoxelNeXt`，再确认两点：
+
+1. detector yaml 本身必须是 points-only，不要是 fusion detector
+2. `GET_ITEM_LIST` 必须是 `["points"]`，这样就不会依赖错误的投影矩阵去做图像分支或 `trans_lidar_to_img`
 
 训练 tracker：
 
