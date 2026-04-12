@@ -36,13 +36,7 @@ def parse_args():
     parser.add_argument('--fig_w', type=float, default=16.0)
     parser.add_argument('--fig_h', type=float, default=8.0)
     parser.add_argument('--point_size', type=float, default=0.3)
-    parser.add_argument('--draw_gt', action='store_true', help='draw gt boxes from tracking info')
-    parser.add_argument('--gt_pkl', type=str, default=None, help='raw GT pkl containing lidar-frame labels')
-    parser.add_argument('--gt_boxes_key', type=str, default='annos.gt_boxes_lidar')
-    parser.add_argument('--gt_names_key', type=str, default='annos.name')
-    parser.add_argument('--gt_sequence_key', type=str, default='sequence_id')
-    parser.add_argument('--gt_frame_idx_key', type=str, default='frame_idx')
-    parser.add_argument('--gt_frame_id_key', type=str, default='frame_id')
+    parser.add_argument('--draw_gt', action='store_true', help='draw gt boxes from tracking_infos pkl')
     parser.add_argument('--out', type=str, required=True, help='output png path')
     return parser.parse_args()
 
@@ -57,56 +51,6 @@ def find_frame_info(tracking_infos, sequence_id, frame_idx):
         if str(info['sequence_id']) == str(sequence_id) and int(info['frame_idx']) == int(frame_idx):
             return info
     raise KeyError(f'Cannot find frame: sequence_id={sequence_id}, frame_idx={frame_idx}')
-
-
-def get_by_path(data, key_path, default=None):
-    cur = data
-    for key in key_path.split('.'):
-        if not isinstance(cur, dict) or key not in cur:
-            return default
-        cur = cur[key]
-    return cur
-
-
-def normalize_sequence_id(value):
-    return '' if value is None else str(value)
-
-
-def normalize_frame_idx(value):
-    if value is None:
-        return None
-    return int(value)
-
-
-def normalize_frame_id(value):
-    if value is None:
-        return None
-    return str(value)
-
-
-def build_gt_index(gt_infos, args):
-    by_frame_idx = {}
-    by_frame_id = {}
-    for info in gt_infos:
-        seq = normalize_sequence_id(get_by_path(info, args.gt_sequence_key))
-        frame_idx = normalize_frame_idx(get_by_path(info, args.gt_frame_idx_key))
-        frame_id = normalize_frame_id(get_by_path(info, args.gt_frame_id_key))
-        if frame_idx is not None:
-            by_frame_idx[(seq, frame_idx)] = info
-        if frame_id is not None:
-            by_frame_id[(seq, frame_id)] = info
-    return by_frame_idx, by_frame_id
-
-
-def find_gt_info(gt_infos, sequence_id, frame_idx, frame_id, args):
-    by_frame_idx, by_frame_id = build_gt_index(gt_infos, args)
-    key_idx = (normalize_sequence_id(sequence_id), normalize_frame_idx(frame_idx))
-    if key_idx in by_frame_idx:
-        return by_frame_idx[key_idx]
-    key_id = (normalize_sequence_id(sequence_id), normalize_frame_id(frame_id))
-    if key_id in by_frame_id:
-        return by_frame_id[key_id]
-    raise KeyError(f'Cannot find GT for sequence_id={sequence_id}, frame_idx={frame_idx}, frame_id={frame_id}')
 
 
 def load_points(data_root, info):
@@ -171,17 +115,11 @@ def main():
     pred_text = [f'{int(lbl)}:{score:.2f}' for lbl, score in zip(pred_labels, pred_scores)]
     draw_boxes(ax, pred_boxes, color='red', linewidth=1.4, labels=pred_text)
 
-    if args.draw_gt:
-        if args.gt_pkl is not None:
-            gt_infos = load_tracking_infos(args.gt_pkl)
-            gt_info = find_gt_info(gt_infos, args.sequence_id, args.frame_idx, info.get('frame_id'), args)
-            gt_boxes = np.asarray(get_by_path(gt_info, args.gt_boxes_key, []), dtype=np.float32).reshape(-1, 7)
-            gt_names = np.asarray(get_by_path(gt_info, args.gt_names_key, []))
-            gt_labels = gt_names.tolist() if gt_names.shape[0] == gt_boxes.shape[0] else None
-            draw_boxes(ax, gt_boxes, color='lime', linewidth=1.1, labels=gt_labels)
-        elif 'annos' in info and 'gt_boxes_lidar' in info['annos']:
-            gt_boxes = np.asarray(info['annos']['gt_boxes_lidar'], dtype=np.float32).reshape(-1, 7)
-            draw_boxes(ax, gt_boxes, color='lime', linewidth=1.1)
+    if args.draw_gt and 'annos' in info and 'gt_boxes_lidar' in info['annos']:
+        gt_boxes = np.asarray(info['annos']['gt_boxes_lidar'], dtype=np.float32).reshape(-1, 7)
+        gt_names = np.asarray(info['annos'].get('name', []))
+        gt_labels = gt_names.tolist() if gt_names.shape[0] == gt_boxes.shape[0] else None
+        draw_boxes(ax, gt_boxes, color='lime', linewidth=1.1, labels=gt_labels)
 
     pc_range = np.asarray(args.point_cloud_range, dtype=np.float32)
     ax.set_xlim(pc_range[0], pc_range[3])
