@@ -35,9 +35,6 @@ class TrackingDataset(Dataset):
         self.history_len = int(dataset_cfg.get('HISTORY_LEN', 8))
         self.match_iou = float(dataset_cfg.get('DET_GT_MATCH_IOU', 0.1))
         self.min_track_history = int(dataset_cfg.get('MIN_TRACK_HISTORY', 1))
-        self.degraded_quality_thresh = float(dataset_cfg.get('DEGRADED_QUALITY_THRESH', 0.45))
-        self.recovery_lookback = int(dataset_cfg.get('RECOVERY_LOOKBACK', 3))
-        self.survival_lookahead = int(dataset_cfg.get('SURVIVAL_LOOKAHEAD', 3))
 
         self.frame_infos = []
         for info_path in dataset_cfg.INFO_PATH[self.mode]:
@@ -213,35 +210,6 @@ class TrackingDataset(Dataset):
             'hit_count': hit_count,
         }
 
-    def _build_recovery_state(self, history_desc, current_obs):
-        observed_flags = history_desc['observed_flags']
-        quality_values = history_desc['quality_values']
-
-        if current_obs is None:
-            return 2  # missing
-
-        recent_missing = any(flag is False for flag in observed_flags[-self.recovery_lookback:]) if observed_flags else False
-        recent_degraded = any(
-            quality < self.degraded_quality_thresh for quality in quality_values[-self.recovery_lookback:]
-        ) if quality_values else False
-        current_quality = float(current_obs['quality_scalar'])
-        last_quality = float(quality_values[-1]) if quality_values else current_quality
-
-        if recent_missing or recent_degraded:
-            return 3  # recovered
-        if current_quality < self.degraded_quality_thresh or last_quality < self.degraded_quality_thresh:
-            return 1  # degraded
-        return 0  # stable
-
-    def _survival_target(self, sequence_id, frame_pos, track_id):
-        infos = self.sequence_to_infos[sequence_id]
-        end = min(len(infos), frame_pos + 1 + self.survival_lookahead)
-        for future_pos in range(frame_pos + 1, end):
-            _, _, future_track_map = self._gt_track_map(infos[future_pos])
-            if track_id in future_track_map:
-                return 1.0
-        return 0.0
-
     def __getitem__(self, index):
         sequence_id, frame_pos, current_info = self.samples[index]
         history_infos = self._history_window(sequence_id, frame_pos)
@@ -275,8 +243,6 @@ class TrackingDataset(Dataset):
         track_context = np.zeros((num_tracks, TRACK_CONTEXT_DIM), dtype=np.float32)
         track_boxes = np.zeros((num_tracks, 7), dtype=np.float32)
         track_class_ids = np.zeros((num_tracks,), dtype=np.int64)
-        recovery_state_targets = np.zeros((num_tracks,), dtype=np.int64)
-        survival_targets = np.zeros((num_tracks,), dtype=np.float32)
         next_geom_targets = np.zeros((num_tracks, GEOM_DIM), dtype=np.float32)
         next_geom_mask = np.zeros((num_tracks,), dtype=np.float32)
 
@@ -302,8 +268,6 @@ class TrackingDataset(Dataset):
             track_boxes[track_pos] = history_desc['last_box']
             track_class_ids[track_pos] = track_labels[track_id]
             assoc_mask[track_pos, current_dets['labels'] == track_labels[track_id]] = True
-            recovery_state_targets[track_pos] = self._build_recovery_state(history_desc, current_obs.get(track_id))
-            survival_targets[track_pos] = self._survival_target(sequence_id, frame_pos, track_id)
             if track_id in next_gt_map:
                 next_geom_targets[track_pos] = build_geometry_tokens(next_gt_map[track_id]['box'][None, :])[0]
                 next_geom_mask[track_pos] = 1.0
@@ -335,8 +299,6 @@ class TrackingDataset(Dataset):
             'candidate_det_labels': current_dets['labels'].astype(np.int64),
             'assoc_targets': assoc_targets.astype(np.float32),
             'assoc_mask': assoc_mask,
-            'recovery_state_targets': recovery_state_targets.astype(np.int64),
-            'survival_targets': survival_targets.astype(np.float32),
             'next_geom_targets': next_geom_targets.astype(np.float32),
             'next_geom_mask': next_geom_mask.astype(np.float32),
             'gt_boxes': current_annos['gt_boxes_lidar'].astype(np.float32),
@@ -371,8 +333,6 @@ def collate_tracking_batch(batch_list):
         'candidate_det_labels': torch.zeros(batch_size, max_dets, dtype=torch.long),
         'assoc_targets': torch.zeros(batch_size, max_tracks, max_dets, dtype=torch.float32),
         'assoc_mask': torch.zeros(batch_size, max_tracks, max_dets, dtype=torch.bool),
-        'recovery_state_targets': torch.zeros(batch_size, max_tracks, dtype=torch.long),
-        'survival_targets': torch.zeros(batch_size, max_tracks, dtype=torch.float32),
         'next_geom_targets': torch.zeros(batch_size, max_tracks, GEOM_DIM, dtype=torch.float32),
         'next_geom_mask': torch.zeros(batch_size, max_tracks, dtype=torch.float32),
         'gt_boxes': torch.zeros(batch_size, max_gt, 7, dtype=torch.float32),
@@ -400,8 +360,6 @@ def collate_tracking_batch(batch_list):
             ret['track_class_ids'][batch_idx, :num_tracks] = torch.from_numpy(item['track_class_ids'])
             ret['assoc_targets'][batch_idx, :num_tracks, :num_dets] = torch.from_numpy(item['assoc_targets'])
             ret['assoc_mask'][batch_idx, :num_tracks, :num_dets] = torch.from_numpy(item['assoc_mask'])
-            ret['recovery_state_targets'][batch_idx, :num_tracks] = torch.from_numpy(item['recovery_state_targets'])
-            ret['survival_targets'][batch_idx, :num_tracks] = torch.from_numpy(item['survival_targets'])
             ret['next_geom_targets'][batch_idx, :num_tracks] = torch.from_numpy(item['next_geom_targets'])
             ret['next_geom_mask'][batch_idx, :num_tracks] = torch.from_numpy(item['next_geom_mask'])
 

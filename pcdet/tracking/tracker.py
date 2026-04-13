@@ -10,6 +10,7 @@ from .utils import (
     QUALITY_DIM,
     TIME_DIM,
     TRACK_CONTEXT_DIM,
+    association_quality,
     build_geometry_tokens,
     build_quality_tokens,
     build_time_token,
@@ -30,8 +31,6 @@ class TrackState:
     quality_history: deque = field(default_factory=lambda: deque(maxlen=8))
     time_history: deque = field(default_factory=lambda: deque(maxlen=8))
     quality_scalar_history: deque = field(default_factory=lambda: deque(maxlen=8))
-    recovery_state: int = 0
-    survival_logit: float = 0.0
 
     def append(self, geom_token, quality_token, time_token, quality_scalar, box, score):
         self.geom_history.append(np.asarray(geom_token, dtype=np.float32))
@@ -52,13 +51,16 @@ class OnlineTracker:
         self.device = device
         self.history_len = int(tracker_cfg.get('HISTORY_LEN', 8))
         self.max_age = int(tracker_cfg.get('MAX_AGE', 3))
-        self.max_age_recovering = int(tracker_cfg.get('MAX_AGE_RECOVERING', self.max_age + 2))
         self.min_hits = int(tracker_cfg.get('MIN_HITS', 2))
         self.match_threshold = float(tracker_cfg.get('MATCH_THRESHOLD', 0.5))
-        self.new_track_score_thresh = float(tracker_cfg.get('NEW_TRACK_SCORE_THRESH', 0.3))
+        self.recovery_match_threshold = float(tracker_cfg.get('RECOVERY_MATCH_THRESHOLD', self.match_threshold + 0.1))
+        self.high_quality_thresh = float(tracker_cfg.get('HIGH_QUALITY_THRESH', 0.3))
+        self.low_quality_thresh = float(tracker_cfg.get('LOW_QUALITY_THRESH', 0.1))
+        self.allow_low_quality_birth = bool(tracker_cfg.get('ALLOW_LOW_QUALITY_BIRTH', False))
         self.assoc_iou_gate = float(tracker_cfg.get('ASSOC_IOU_GATE', 0.01))
         self.assoc_center_dist = float(tracker_cfg.get('ASSOC_CENTER_DIST', 8.0))
-        self.survival_threshold = float(tracker_cfg.get('SURVIVAL_THRESHOLD', 0.45))
+        self.recovery_assoc_iou_gate = float(tracker_cfg.get('RECOVERY_ASSOC_IOU_GATE', self.assoc_iou_gate))
+        self.recovery_assoc_center_dist = float(tracker_cfg.get('RECOVERY_ASSOC_CENTER_DIST', max(self.assoc_center_dist * 0.5, 1.0)))
         self.reset()
 
     def reset(self):
@@ -107,7 +109,7 @@ class OnlineTracker:
         }
         return batch, track_boxes, track_labels
 
-    def _candidate_mask(self, track_boxes, track_labels, det_boxes, det_labels):
+    def _candidate_mask(self, track_boxes, track_labels, det_boxes, det_labels, iou_gate, center_dist_gate):
         if len(track_boxes) == 0 or len(det_boxes) == 0:
             return np.zeros((len(track_boxes), len(det_boxes)), dtype=bool)
 
@@ -116,7 +118,7 @@ class OnlineTracker:
         track_centers = np.asarray(track_boxes, dtype=np.float32)[:, None, 0:2]
         det_centers = np.asarray(det_boxes, dtype=np.float32)[None, :, 0:2]
         center_dist = np.linalg.norm(track_centers - det_centers, axis=-1)
-        return same_class & ((iou >= self.assoc_iou_gate) | (center_dist <= self.assoc_center_dist))
+        return same_class & ((iou >= iou_gate) | (center_dist <= center_dist_gate))
 
     def _detection_tokens(self, frame_data):
         det_boxes = np.asarray(frame_data.get('pred_boxes', []), dtype=np.float32).reshape(-1, 7)
@@ -126,7 +128,30 @@ class OnlineTracker:
         obs_quality_vec = get_cache_obs_quality(frame_data, len(det_scores))
         det_geom = build_geometry_tokens(det_boxes)
         det_quality, det_quality_scalar = build_quality_tokens(det_scores, reliability, obs_quality_vec)
-        return det_boxes, det_scores, det_labels, det_geom, det_quality, det_quality_scalar
+        det_assoc_quality = association_quality(det_scores, reliability, obs_quality_vec, quality_scalar=det_quality_scalar)
+        return det_boxes, det_scores, det_labels, det_geom, det_quality, det_quality_scalar, det_assoc_quality
+
+    @staticmethod
+    def _run_matching(pair_scores, candidate_mask, threshold, track_indices=None, det_indices=None):
+        if pair_scores.size == 0:
+            return []
+        if track_indices is not None:
+            track_indices = np.asarray(track_indices, dtype=np.int64)
+            pair_scores = pair_scores[track_indices]
+            candidate_mask = candidate_mask[track_indices]
+        if det_indices is not None:
+            det_indices = np.asarray(det_indices, dtype=np.int64)
+            pair_scores = pair_scores[:, det_indices]
+            candidate_mask = candidate_mask[:, det_indices]
+
+        matches = []
+        for track_pos, det_pos in hungarian_assign(1.0 - pair_scores, candidate_mask):
+            if pair_scores[track_pos, det_pos] < threshold:
+                continue
+            global_track_idx = int(track_indices[track_pos]) if track_indices is not None else int(track_pos)
+            global_det_idx = int(det_indices[det_pos]) if det_indices is not None else int(det_pos)
+            matches.append((global_track_idx, global_det_idx))
+        return matches
 
     def _append_new_track(self, label, score, det_box, det_geom, det_quality, det_quality_scalar):
         initial_time = build_time_token(age_delta=0.0, missing_gap=0.0, hit_count=1.0 / float(max(self.history_len, 1)), quality_trend=0.0)
@@ -146,13 +171,36 @@ class OnlineTracker:
         self.tracks.append(track)
         self.next_track_id += 1
 
+    def _update_track_with_detection(self, track_idx, det_idx, det_boxes, det_scores, det_geom, det_quality, det_quality_scalar):
+        missing_gap = float(self.tracks[track_idx].missed) / float(max(self.history_len, 1))
+        hit_count = float(self.tracks[track_idx].hits + 1) / float(max(self.history_len, 1))
+        quality_trend = det_quality_scalar[det_idx] - (
+            self.tracks[track_idx].quality_scalar_history[-1] if len(self.tracks[track_idx].quality_scalar_history) > 0 else det_quality_scalar[det_idx]
+        )
+        time_token = build_time_token(
+            age_delta=0.0,
+            missing_gap=missing_gap,
+            hit_count=hit_count,
+            quality_trend=quality_trend,
+        )
+        self.tracks[track_idx].append(
+            det_geom[det_idx],
+            det_quality[det_idx],
+            time_token,
+            det_quality_scalar[det_idx],
+            det_boxes[det_idx],
+            det_scores[det_idx],
+        )
+
     def update(self, frame_data):
-        det_boxes, det_scores, det_labels, det_geom, det_quality, det_quality_scalar = self._detection_tokens(frame_data)
+        det_boxes, det_scores, det_labels, det_geom, det_quality, det_quality_scalar, det_assoc_quality = self._detection_tokens(frame_data)
         for track in self.tracks:
             track.missed += 1
 
         matched_tracks = set()
         matched_dets = set()
+        high_quality_mask = det_assoc_quality >= self.high_quality_thresh
+        low_quality_mask = (det_assoc_quality >= self.low_quality_thresh) & ~high_quality_mask
         if self.tracks and len(det_boxes) > 0:
             track_batch, track_boxes, track_labels = self._build_track_batch()
             model_input = dict(track_batch)
@@ -162,42 +210,51 @@ class OnlineTracker:
             with torch.no_grad():
                 output = self.model(model_input)
                 pair_scores = torch.sigmoid(output['association_logits'][0]).cpu().numpy()
-                survival_scores = torch.sigmoid(output['survival_logits'][0]).cpu().numpy()
-                recovery_state = torch.argmax(output['recovery_state_logits'][0], dim=-1).cpu().numpy()
 
-            candidate_mask = self._candidate_mask(track_boxes, track_labels, det_boxes, det_labels)
-            matches = hungarian_assign(1.0 - pair_scores, candidate_mask)
-            for track_idx, det_idx in matches:
-                if pair_scores[track_idx, det_idx] < self.match_threshold:
-                    continue
-                missing_gap = float(self.tracks[track_idx].missed) / float(max(self.history_len, 1))
-                hit_count = float(self.tracks[track_idx].hits + 1) / float(max(self.history_len, 1))
-                quality_trend = det_quality_scalar[det_idx] - (
-                    self.tracks[track_idx].quality_scalar_history[-1] if len(self.tracks[track_idx].quality_scalar_history) > 0 else det_quality_scalar[det_idx]
+            primary_mask = self._candidate_mask(
+                track_boxes, track_labels, det_boxes, det_labels, self.assoc_iou_gate, self.assoc_center_dist
+            )
+            primary_matches = self._run_matching(
+                pair_scores, primary_mask, self.match_threshold, det_indices=np.flatnonzero(high_quality_mask)
+            )
+            for track_idx, det_idx in primary_matches:
+                self._update_track_with_detection(
+                    track_idx, det_idx, det_boxes, det_scores, det_geom, det_quality, det_quality_scalar
                 )
-                time_token = build_time_token(
-                    age_delta=0.0,
-                    missing_gap=missing_gap,
-                    hit_count=hit_count,
-                    quality_trend=quality_trend,
-                )
-                self.tracks[track_idx].append(
-                    det_geom[det_idx],
-                    det_quality[det_idx],
-                    time_token,
-                    det_quality_scalar[det_idx],
-                    det_boxes[det_idx],
-                    det_scores[det_idx],
-                )
-                self.tracks[track_idx].recovery_state = int(recovery_state[track_idx])
-                self.tracks[track_idx].survival_logit = float(survival_scores[track_idx])
                 matched_tracks.add(track_idx)
                 matched_dets.add(det_idx)
 
+            recovery_track_indices = np.asarray(
+                [idx for idx, track in enumerate(self.tracks) if idx not in matched_tracks and track.missed > 0],
+                dtype=np.int64,
+            )
+            recovery_det_indices = np.flatnonzero(low_quality_mask & ~np.isin(np.arange(len(det_boxes)), list(matched_dets)))
+            if recovery_track_indices.size > 0 and recovery_det_indices.size > 0:
+                recovery_mask = self._candidate_mask(
+                    track_boxes,
+                    track_labels,
+                    det_boxes,
+                    det_labels,
+                    self.recovery_assoc_iou_gate,
+                    self.recovery_assoc_center_dist,
+                )
+                recovery_matches = self._run_matching(
+                    pair_scores,
+                    recovery_mask,
+                    self.recovery_match_threshold,
+                    track_indices=recovery_track_indices,
+                    det_indices=recovery_det_indices,
+                )
+                for track_idx, det_idx in recovery_matches:
+                    self._update_track_with_detection(
+                        track_idx, det_idx, det_boxes, det_scores, det_geom, det_quality, det_quality_scalar
+                    )
+                    matched_tracks.add(track_idx)
+                    matched_dets.add(det_idx)
+
         survivors = []
         for idx, track in enumerate(self.tracks):
-            dynamic_max_age = self.max_age_recovering if track.survival_logit >= self.survival_threshold else self.max_age
-            if idx not in matched_tracks and track.missed > dynamic_max_age:
+            if idx not in matched_tracks and track.missed > self.max_age:
                 continue
             survivors.append(track)
         self.tracks = survivors
@@ -205,7 +262,7 @@ class OnlineTracker:
         for det_idx in range(len(det_boxes)):
             if det_idx in matched_dets:
                 continue
-            if det_scores[det_idx] < self.new_track_score_thresh:
+            if det_assoc_quality[det_idx] < self.high_quality_thresh and not self.allow_low_quality_birth:
                 continue
             self._append_new_track(
                 label=det_labels[det_idx],
@@ -225,7 +282,6 @@ class OnlineTracker:
                 'pred_box': track.last_box.copy(),
                 'pred_label': int(track.label),
                 'pred_score': float(track.score),
-                'recovery_state': int(track.recovery_state),
                 'missed': int(track.missed),
             })
         return outputs

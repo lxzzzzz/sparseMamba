@@ -55,8 +55,6 @@ def build_model(model_cfg):
         dropout=float(model_cfg.get('DROPOUT', 0.1)),
         pos_weight=float(model_cfg.get('POS_WEIGHT', 6.0)),
         assoc_weight=float(model_cfg.get('ASSOC_WEIGHT', 1.0)),
-        recovery_weight=float(model_cfg.get('RECOVERY_WEIGHT', 0.5)),
-        survival_weight=float(model_cfg.get('SURVIVAL_WEIGHT', 0.3)),
         motion_weight=float(model_cfg.get('MOTION_WEIGHT', 0.4)),
     )
 
@@ -88,13 +86,11 @@ def log_val_metrics(tb_log, logger, val_metrics, step, epoch, prefix='val'):
     for key, value in val_metrics.items():
         tb_log.add_scalar(f'{prefix}/{key}', value, step)
     logger.info(
-        'Epoch %d %s_loss=%.6f assoc=%.6f recovery=%.6f survival=%.6f motion=%.6f',
+        'Epoch %d %s_loss=%.6f assoc=%.6f motion=%.6f',
         epoch,
         prefix,
         val_metrics['loss'],
         val_metrics.get('loss_assoc', 0.0),
-        val_metrics.get('loss_recovery', 0.0),
-        val_metrics.get('loss_survival', 0.0),
         val_metrics.get('loss_motion', 0.0),
     )
 
@@ -191,12 +187,10 @@ def main():
         for key, value in epoch_tb.items():
             tb_log.add_scalar(f'train/{key}', value / max(len(train_loader), 1), global_step)
         logger.info(
-            'Epoch %d train_loss=%.6f assoc=%.6f recovery=%.6f survival=%.6f motion=%.6f',
+            'Epoch %d train_loss=%.6f assoc=%.6f motion=%.6f',
             epoch,
             avg_train_loss,
             avg_train_tb.get('loss_assoc', 0.0),
-            avg_train_tb.get('loss_recovery', 0.0),
-            avg_train_tb.get('loss_survival', 0.0),
             avg_train_tb.get('loss_motion', 0.0),
         )
 

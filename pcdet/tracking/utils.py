@@ -71,6 +71,30 @@ def build_quality_tokens(scores, reliability, obs_quality_vec):
     return quality_tokens, quality_scalar
 
 
+def has_meaningful_quality(scores, reliability, obs_quality_vec):
+    scores = np.asarray(scores, dtype=np.float32).reshape(-1)
+    reliability = np.asarray(reliability, dtype=np.float32).reshape(-1)
+    obs_quality_vec = ensure_quality_vec(obs_quality_vec, len(scores))
+    if len(scores) == 0:
+        return False
+    if np.any(np.abs(obs_quality_vec) > 1e-6):
+        return True
+    return not np.allclose(reliability, scores, atol=1e-6)
+
+
+def association_quality(scores, reliability, obs_quality_vec, quality_scalar=None):
+    scores = np.asarray(scores, dtype=np.float32).reshape(-1)
+    reliability = np.asarray(reliability, dtype=np.float32).reshape(-1)
+    obs_quality_vec = ensure_quality_vec(obs_quality_vec, len(scores))
+    if quality_scalar is None:
+        quality_scalar = compose_quality_scalar(scores, reliability, obs_quality_vec)
+    else:
+        quality_scalar = np.asarray(quality_scalar, dtype=np.float32).reshape(-1)
+    if has_meaningful_quality(scores, reliability, obs_quality_vec):
+        return quality_scalar.astype(np.float32)
+    return scores.astype(np.float32)
+
+
 def build_time_token(age_delta, missing_gap, hit_count, quality_trend):
     return np.asarray([
         float(age_delta),
