@@ -12,6 +12,7 @@ import numpy as np
 from pcdet.tracking.assignment import bev_iou_matrix, hungarian_assign
 from pcdet.tracking.cache import load_frame_cache
 from pcdet.tracking.metrics import TrackingMetrics
+from pcdet.tracking.utils import filter_boxes_by_spatial_range, normalize_bev_range
 
 
 @dataclass
@@ -26,13 +27,14 @@ class TrackState:
 
 
 class AB3DMOTBaseline:
-    def __init__(self, max_age=2, min_hits=2, match_iou=0.1, score_thresh=0.1, center_gate=8.0, max_distance=None):
+    def __init__(self, max_age=2, min_hits=2, match_iou=0.1, score_thresh=0.1, center_gate=8.0, max_distance=None, bev_range=None):
         self.max_age = int(max_age)
         self.min_hits = int(min_hits)
         self.match_iou = float(match_iou)
         self.score_thresh = float(score_thresh)
         self.center_gate = float(center_gate)
         self.max_distance = None if max_distance is None else float(max_distance)
+        self.bev_range = normalize_bev_range(bev_range)
         self.next_track_id = 1
         self.tracks = []
 
@@ -56,11 +58,13 @@ class AB3DMOTBaseline:
         return valid
 
     def _filter_det_by_distance(self, det_boxes, det_scores, det_labels):
-        if self.max_distance is None or det_boxes.shape[0] == 0:
-            return det_boxes, det_scores, det_labels
-        ranges = np.linalg.norm(det_boxes[:, 0:2], axis=1)
-        keep = ranges <= self.max_distance
-        return det_boxes[keep], det_scores[keep], det_labels[keep]
+        return filter_boxes_by_spatial_range(
+            det_boxes,
+            det_scores,
+            det_labels,
+            max_distance=self.max_distance,
+            bev_range=self.bev_range,
+        )
 
     def update(self, frame_cache):
         det_boxes = np.asarray(frame_cache.get('pred_boxes', []), dtype=np.float32).reshape(-1, 7)
@@ -152,6 +156,8 @@ def parse_args():
     parser.add_argument('--max_age', type=int, default=2)
     parser.add_argument('--min_hits', type=int, default=2)
     parser.add_argument('--max_distance', type=float, default=100.0, help='evaluate and track targets within XY range only')
+    parser.add_argument('--bev_range', type=float, nargs=4, default=None, metavar=('X_MIN', 'Y_MIN', 'X_MAX', 'Y_MAX'),
+                        help='optional BEV evaluation range [x_min, y_min, x_max, y_max] in lidar coordinates')
     parser.add_argument('--save_dir', type=str, required=True, help='output dir for metrics and tracking results')
     return parser.parse_args()
 
@@ -164,20 +170,6 @@ def load_pickle(path):
 def class_names_to_labels(class_names, names):
     name_to_label = {name: idx + 1 for idx, name in enumerate(class_names)}
     return np.asarray([name_to_label.get(name, -1) for name in names], dtype=np.int64)
-
-
-def filter_boxes_by_distance(boxes, *extra_arrays, max_distance=None):
-    boxes = np.asarray(boxes, dtype=np.float32).reshape(-1, 7)
-    if max_distance is None or boxes.shape[0] == 0:
-        return (boxes, *extra_arrays)
-
-    ranges = np.linalg.norm(boxes[:, 0:2], axis=1)
-    keep = ranges <= float(max_distance)
-    filtered = [boxes[keep]]
-    for arr in extra_arrays:
-        arr = np.asarray(arr)
-        filtered.append(arr[keep])
-    return tuple(filtered)
 
 
 def main():
@@ -199,6 +191,7 @@ def main():
         score_thresh=args.score_thresh,
         center_gate=args.center_gate,
         max_distance=args.max_distance,
+        bev_range=args.bev_range,
     )
     metrics = TrackingMetrics(iou_threshold=args.match_iou)
     results = {}
@@ -223,15 +216,15 @@ def main():
             gt_boxes = np.asarray(gt_annos.get('gt_boxes_lidar', []), dtype=np.float32).reshape(-1, 7)
             gt_ids = np.asarray(gt_annos.get('track_id', []), dtype=np.int64)
             gt_labels = class_names_to_labels(args.class_names, gt_annos.get('name', []))
-            gt_boxes, gt_ids, gt_labels = filter_boxes_by_distance(
-                gt_boxes, gt_ids, gt_labels, max_distance=args.max_distance
+            gt_boxes, gt_ids, gt_labels = filter_boxes_by_spatial_range(
+                gt_boxes, gt_ids, gt_labels, max_distance=args.max_distance, bev_range=args.bev_range
             )
 
             pred_boxes = np.asarray([item['pred_box'] for item in outputs], dtype=np.float32).reshape(-1, 7)
             pred_ids = np.asarray([item['track_id'] for item in outputs], dtype=np.int64)
             pred_labels = np.asarray([item['pred_label'] for item in outputs], dtype=np.int64)
-            pred_boxes, pred_ids, pred_labels = filter_boxes_by_distance(
-                pred_boxes, pred_ids, pred_labels, max_distance=args.max_distance
+            pred_boxes, pred_ids, pred_labels = filter_boxes_by_spatial_range(
+                pred_boxes, pred_ids, pred_labels, max_distance=args.max_distance, bev_range=args.bev_range
             )
             metrics.update(sequence_id, gt_boxes, gt_ids, gt_labels, pred_boxes, pred_ids, pred_labels)
 
@@ -241,6 +234,7 @@ def main():
     elapsed = max(time.perf_counter() - start_time, 1e-6)
     metric_dict['fps'] = float(total_frames / elapsed)
     metric_dict['max_distance'] = None if args.max_distance is None else float(args.max_distance)
+    metric_dict['bev_range'] = None if args.bev_range is None else [float(v) for v in normalize_bev_range(args.bev_range).tolist()]
     metric_dict['num_frames'] = int(total_frames)
     metric_dict['num_sequences'] = int(len(sequence_to_infos))
     metric_dict['MOTA'] = metric_dict.get('mota', 0.0)
@@ -280,6 +274,7 @@ def main():
     print(f'max_age: {args.max_age}')
     print(f'min_hits: {args.min_hits}')
     print(f'max_distance: {args.max_distance}')
+    print(f'bev_range: {None if args.bev_range is None else [float(v) for v in normalize_bev_range(args.bev_range).tolist()]}')
     print(
         'Summary | '
         f"MOTA={metric_dict.get('mota', 0.0):.4f} "

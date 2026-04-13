@@ -136,3 +136,47 @@ def get_cache_obs_quality(frame_cache, length=None):
         else:
             length = len(frame_cache.get('pred_scores', []))
     return ensure_quality_vec(obs_quality_vec, length)
+
+
+def normalize_bev_range(bev_range):
+    if bev_range is None:
+        return None
+    bev_range = np.asarray(bev_range, dtype=np.float32).reshape(-1)
+    if bev_range.shape[0] != 4:
+        raise ValueError(f'bev_range must have 4 values [x_min, y_min, x_max, y_max], got {bev_range.tolist()}')
+    x_min, y_min, x_max, y_max = bev_range.tolist()
+    if x_min > x_max or y_min > y_max:
+        raise ValueError(f'invalid bev_range ordering: {bev_range.tolist()}')
+    return np.asarray([x_min, y_min, x_max, y_max], dtype=np.float32)
+
+
+def build_box_filter_mask(boxes, max_distance=None, bev_range=None):
+    boxes = np.asarray(boxes, dtype=np.float32).reshape(-1, 7)
+    keep = np.ones((boxes.shape[0],), dtype=np.bool_)
+    if boxes.shape[0] == 0:
+        return keep
+
+    if max_distance is not None:
+        ranges = np.linalg.norm(boxes[:, 0:2], axis=1)
+        keep &= ranges <= float(max_distance)
+
+    bev_range = normalize_bev_range(bev_range)
+    if bev_range is not None:
+        x_min, y_min, x_max, y_max = bev_range.tolist()
+        keep &= (
+            (boxes[:, 0] >= x_min)
+            & (boxes[:, 0] <= x_max)
+            & (boxes[:, 1] >= y_min)
+            & (boxes[:, 1] <= y_max)
+        )
+    return keep
+
+
+def filter_boxes_by_spatial_range(boxes, *extra_arrays, max_distance=None, bev_range=None):
+    boxes = np.asarray(boxes, dtype=np.float32).reshape(-1, 7)
+    keep = build_box_filter_mask(boxes, max_distance=max_distance, bev_range=bev_range)
+    filtered = [boxes[keep]]
+    for arr in extra_arrays:
+        arr = np.asarray(arr)
+        filtered.append(arr[keep])
+    return tuple(filtered)

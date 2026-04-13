@@ -12,8 +12,10 @@ import numpy as np
 from pcdet.tracking.utils import (
     association_quality,
     compose_quality_scalar,
+    filter_boxes_by_spatial_range,
     get_cache_obs_quality,
     get_cache_reliability,
+    normalize_bev_range,
 )
 
 
@@ -47,20 +49,6 @@ def load_pickle(path):
 def class_names_to_labels(class_names, names):
     name_to_label = {name: idx + 1 for idx, name in enumerate(class_names)}
     return np.asarray([name_to_label.get(name, -1) for name in names], dtype=np.int64)
-
-
-def filter_boxes_by_distance(boxes, *extra_arrays, max_distance=None):
-    boxes = np.asarray(boxes, dtype=np.float32).reshape(-1, 7)
-    if max_distance is None or boxes.shape[0] == 0:
-        return (boxes, *extra_arrays)
-
-    ranges = np.linalg.norm(boxes[:, 0:2], axis=1)
-    keep = ranges <= float(max_distance)
-    filtered = [boxes[keep]]
-    for arr in extra_arrays:
-        arr = np.asarray(arr)
-        filtered.append(arr[keep])
-    return tuple(filtered)
 
 
 def enrich_metric_dict(metric_dict, total_frames, num_sequences, elapsed, stage_stats):
@@ -118,6 +106,7 @@ class UDCAPolicyTracker:
         rescue_center_gate=12.0,
         fallback_center_gate=8.0,
         max_distance=None,
+        bev_range=None,
         u3d_high=0.55,
         u2d_high=0.55,
         rescue_min_visual_conf=0.35,
@@ -132,6 +121,7 @@ class UDCAPolicyTracker:
         self.rescue_center_gate = float(rescue_center_gate)
         self.fallback_center_gate = float(fallback_center_gate)
         self.max_distance = None if max_distance is None else float(max_distance)
+        self.bev_range = normalize_bev_range(bev_range)
         self.u3d_high = float(u3d_high)
         self.u2d_high = float(u2d_high)
         self.rescue_min_visual_conf = float(rescue_min_visual_conf)
@@ -159,16 +149,14 @@ class UDCAPolicyTracker:
         return np.stack(predicted, axis=0).astype(np.float32)
 
     def _filter_det_by_distance(self, det_boxes, det_scores, det_labels, det_reliability, det_obs_quality):
-        if self.max_distance is None or det_boxes.shape[0] == 0:
-            return det_boxes, det_scores, det_labels, det_reliability, det_obs_quality
-        ranges = np.linalg.norm(det_boxes[:, 0:2], axis=1)
-        keep = ranges <= self.max_distance
-        return (
-            det_boxes[keep],
-            det_scores[keep],
-            det_labels[keep],
-            det_reliability[keep],
-            det_obs_quality[keep],
+        return filter_boxes_by_spatial_range(
+            det_boxes,
+            det_scores,
+            det_labels,
+            det_reliability,
+            det_obs_quality,
+            max_distance=self.max_distance,
+            bev_range=self.bev_range,
         )
 
     def _extract_detections(self, frame_cache):
@@ -455,6 +443,8 @@ def parse_args():
     parser.add_argument('--max_age', type=int, default=2)
     parser.add_argument('--min_hits', type=int, default=2)
     parser.add_argument('--max_distance', type=float, default=100.0, help='evaluate and track targets within XY range only')
+    parser.add_argument('--bev_range', type=float, nargs=4, default=None, metavar=('X_MIN', 'Y_MIN', 'X_MAX', 'Y_MAX'),
+                        help='optional BEV evaluation range [x_min, y_min, x_max, y_max] in lidar coordinates')
     parser.add_argument('--u3d_high', type=float, default=0.55, help='high 3D uncertainty threshold')
     parser.add_argument('--u2d_high', type=float, default=0.55, help='high 2D uncertainty threshold')
     parser.add_argument('--rescue_min_visual_conf', type=float, default=0.35, help='minimum visual confidence for stage-2 rescue')
@@ -487,6 +477,7 @@ def main():
         rescue_center_gate=args.rescue_center_gate,
         fallback_center_gate=args.fallback_center_gate,
         max_distance=args.max_distance,
+        bev_range=args.bev_range,
         u3d_high=args.u3d_high,
         u2d_high=args.u2d_high,
         rescue_min_visual_conf=args.rescue_min_visual_conf,
@@ -516,13 +507,15 @@ def main():
             gt_boxes = np.asarray(gt_annos.get('gt_boxes_lidar', []), dtype=np.float32).reshape(-1, 7)
             gt_ids = np.asarray(gt_annos.get('track_id', []), dtype=np.int64)
             gt_labels = class_names_to_labels(args.class_names, gt_annos.get('name', []))
-            gt_boxes, gt_ids, gt_labels = filter_boxes_by_distance(gt_boxes, gt_ids, gt_labels, max_distance=args.max_distance)
+            gt_boxes, gt_ids, gt_labels = filter_boxes_by_spatial_range(
+                gt_boxes, gt_ids, gt_labels, max_distance=args.max_distance, bev_range=args.bev_range
+            )
 
             pred_boxes = np.asarray([item['pred_box'] for item in outputs], dtype=np.float32).reshape(-1, 7)
             pred_ids = np.asarray([item['track_id'] for item in outputs], dtype=np.int64)
             pred_labels = np.asarray([item['pred_label'] for item in outputs], dtype=np.int64)
-            pred_boxes, pred_ids, pred_labels = filter_boxes_by_distance(
-                pred_boxes, pred_ids, pred_labels, max_distance=args.max_distance
+            pred_boxes, pred_ids, pred_labels = filter_boxes_by_spatial_range(
+                pred_boxes, pred_ids, pred_labels, max_distance=args.max_distance, bev_range=args.bev_range
             )
             metrics.update(sequence_id, gt_boxes, gt_ids, gt_labels, pred_boxes, pred_ids, pred_labels)
 
@@ -537,6 +530,8 @@ def main():
         elapsed=time.perf_counter() - start_time,
         stage_stats=stage_stats,
     )
+    metric_dict['max_distance'] = None if args.max_distance is None else float(args.max_distance)
+    metric_dict['bev_range'] = None if args.bev_range is None else [float(v) for v in normalize_bev_range(args.bev_range).tolist()]
     with open(save_dir / 'udca_policy_metrics.json', 'w') as f:
         json.dump(metric_dict, f, indent=2)
     with open(save_dir / 'udca_policy_results.pkl', 'wb') as f:
@@ -552,6 +547,8 @@ def main():
     print(f'fallback_center_gate: {args.fallback_center_gate}')
     print(f'max_age: {args.max_age}')
     print(f'min_hits: {args.min_hits}')
+    print(f'max_distance: {args.max_distance}')
+    print(f'bev_range: {None if args.bev_range is None else [float(v) for v in normalize_bev_range(args.bev_range).tolist()]}')
     print(f'u3d_high: {args.u3d_high}')
     print(f'u2d_high: {args.u2d_high}')
     print(f'rescue_min_visual_conf: {args.rescue_min_visual_conf}')
