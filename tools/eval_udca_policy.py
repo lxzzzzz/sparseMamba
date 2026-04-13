@@ -105,9 +105,6 @@ class TrackState:
     missed: int
     last_box: np.ndarray
     velocity_xy: np.ndarray
-    last_visual_conf: float
-    last_u3d: float
-    status: str
 
 
 class UDCAPolicyTracker:
@@ -142,11 +139,13 @@ class UDCAPolicyTracker:
         self.disable_stage3 = bool(disable_stage3)
         self.next_track_id = 1
         self.tracks = []
+        self.track_meta = {}
         self.stage_stats = defaultdict(int)
 
     def reset(self):
         self.next_track_id = 1
         self.tracks = []
+        self.track_meta = {}
         self.stage_stats = defaultdict(int)
 
     def _predict_boxes(self):
@@ -220,6 +219,18 @@ class UDCAPolicyTracker:
         valid = same_class & ((iou >= iou_gate) | (center_dist <= center_gate))
         return valid
 
+    def _stage3_iou_matrix(self, pred_boxes, det_boxes):
+        # Hook for a 3D-scene-adapted IoU variant while keeping AB3DMOT-compatible flow.
+        return bev_iou_matrix(pred_boxes, det_boxes)
+
+    def _stage3_candidate_mask(self, pred_boxes, track_labels, det_boxes, det_labels):
+        if pred_boxes.shape[0] == 0 or det_boxes.shape[0] == 0:
+            return np.zeros((pred_boxes.shape[0], det_boxes.shape[0]), dtype=bool)
+        iou = self._stage3_iou_matrix(pred_boxes, det_boxes)
+        same_class = track_labels[:, None] == det_labels[None, :]
+        center_dist = np.linalg.norm(pred_boxes[:, None, 0:2] - det_boxes[None, :, 0:2], axis=-1)
+        return same_class & ((iou >= self.match_iou) | (center_dist <= self.fallback_center_gate))
+
     @staticmethod
     def _select_subset(cost, valid, row_indices=None, col_indices=None):
         if row_indices is not None:
@@ -250,8 +261,8 @@ class UDCAPolicyTracker:
         center_dist = np.linalg.norm(pred_boxes[:, None, 0:2] - det_boxes[None, :, 0:2], axis=-1)
         center_score = 1.0 - np.clip(center_dist / max(self.center_gate, 1e-3), 0.0, 1.0)
 
-        track_visual = np.asarray([track.last_visual_conf for track in self.tracks], dtype=np.float32)
-        track_u3d = np.asarray([track.last_u3d for track in self.tracks], dtype=np.float32)
+        track_visual = np.asarray([self.track_meta.get(track.track_id, {}).get('visual_conf', 0.0) for track in self.tracks], dtype=np.float32)
+        track_u3d = np.asarray([self.track_meta.get(track.track_id, {}).get('u3d', 1.0) for track in self.tracks], dtype=np.float32)
 
         visual_consistency = 1.0 - np.abs(track_visual[:, None] - dets['visual_conf'][None, :])
         visual_consistency = clamp01(visual_consistency)
@@ -276,22 +287,13 @@ class UDCAPolicyTracker:
         iou = bev_iou_matrix(pred_boxes, det_boxes)
         center_dist = np.linalg.norm(pred_boxes[:, None, 0:2] - det_boxes[None, :, 0:2], axis=-1)
         center_score = 1.0 - np.clip(center_dist / max(self.rescue_center_gate, 1e-3), 0.0, 1.0)
-        track_visual = np.asarray([track.last_visual_conf for track in self.tracks], dtype=np.float32)
+        track_visual = np.asarray([self.track_meta.get(track.track_id, {}).get('visual_conf', 0.0) for track in self.tracks], dtype=np.float32)
         visual_consistency = 1.0 - np.abs(track_visual[:, None] - dets['visual_conf'][None, :])
         visual_consistency = clamp01(visual_consistency)
 
         cost_3d = 0.5 * (1.0 - iou) + 0.5 * (1.0 - center_score)
         cost_2d = 1.0 - visual_consistency
         return (0.35 * cost_3d + 0.65 * cost_2d).astype(np.float32)
-
-    def _fallback_cost(self, pred_boxes, dets):
-        det_boxes = dets['boxes']
-        if pred_boxes.shape[0] == 0 or det_boxes.shape[0] == 0:
-            return np.zeros((pred_boxes.shape[0], det_boxes.shape[0]), dtype=np.float32)
-        iou = bev_iou_matrix(pred_boxes, det_boxes)
-        center_dist = np.linalg.norm(pred_boxes[:, None, 0:2] - det_boxes[None, :, 0:2], axis=-1)
-        center_score = 1.0 - np.clip(center_dist / max(self.fallback_center_gate, 1e-3), 0.0, 1.0)
-        return (0.8 * (1.0 - iou) + 0.2 * (1.0 - center_score)).astype(np.float32)
 
     def _update_track(self, track_idx, det_idx, dets, status):
         track = self.tracks[track_idx]
@@ -302,26 +304,30 @@ class UDCAPolicyTracker:
         track.score = float(dets['scores'][det_idx])
         track.hits += 1
         track.missed = 0
-        track.last_visual_conf = float(dets['visual_conf'][det_idx])
-        track.last_u3d = float(dets['u3d'][det_idx])
-        track.status = status
+        self.track_meta[track.track_id] = {
+            'visual_conf': float(dets['visual_conf'][det_idx]),
+            'u3d': float(dets['u3d'][det_idx]),
+            'status': status,
+        }
 
     def _append_new_track(self, det_idx, dets):
-        visual_conf = float(dets['visual_conf'][det_idx])
+        track_id = self.next_track_id
         self.tracks.append(
             TrackState(
-                track_id=self.next_track_id,
+                track_id=track_id,
                 label=int(dets['labels'][det_idx]),
                 score=float(dets['scores'][det_idx]),
                 hits=1,
                 missed=0,
                 last_box=dets['boxes'][det_idx].copy(),
                 velocity_xy=np.zeros((2,), dtype=np.float32),
-                last_visual_conf=visual_conf,
-                last_u3d=float(dets['u3d'][det_idx]),
-                status='stable' if dets['u3d'][det_idx] <= self.u3d_high else 'fragile',
             )
         )
+        self.track_meta[track_id] = {
+            'visual_conf': float(dets['visual_conf'][det_idx]),
+            'u3d': float(dets['u3d'][det_idx]),
+            'status': 'stable' if dets['u3d'][det_idx] <= self.u3d_high else 'fragile',
+        }
         self.next_track_id += 1
         self.stage_stats['births'] += 1
 
@@ -333,8 +339,9 @@ class UDCAPolicyTracker:
 
         for track in self.tracks:
             track.missed += 1
-            if track.missed > 0 and track.status == 'stable':
-                track.status = 'fragile'
+            meta = self.track_meta.setdefault(track.track_id, {'visual_conf': 0.0, 'u3d': 1.0, 'status': 'fragile'})
+            if track.missed > 0 and meta.get('status') == 'stable':
+                meta['status'] = 'fragile'
 
         matched_track_ids = set()
         matched_det_ids = set()
@@ -382,22 +389,26 @@ class UDCAPolicyTracker:
 
         # Stage 3: pure 3D fallback
         if not self.disable_stage3:
-            track_candidates = np.asarray(
-                [idx for idx in range(len(self.tracks)) if idx not in matched_track_ids],
-                dtype=np.int64,
-            )
-            det_candidates = np.asarray(
-                [idx for idx in range(det_boxes.shape[0]) if idx not in matched_det_ids],
-                dtype=np.int64,
-            )
+            track_candidates = np.asarray([idx for idx in range(len(self.tracks)) if idx not in matched_track_ids], dtype=np.int64)
+            det_candidates = np.asarray([idx for idx in range(det_boxes.shape[0]) if idx not in matched_det_ids], dtype=np.int64)
             if track_candidates.size > 0 and det_candidates.size > 0:
-                valid3 = self._candidate_mask(
-                    pred_boxes, track_labels, det_boxes, det_labels, self.match_iou, self.fallback_center_gate
-                )
-                cost3 = self._fallback_cost(pred_boxes, dets)
-                for track_idx, det_idx in self._match_subset(cost3, valid3, row_indices=track_candidates, col_indices=det_candidates):
+                stage3_pred_boxes = pred_boxes[track_candidates]
+                stage3_track_labels = track_labels[track_candidates]
+                stage3_det_boxes = det_boxes[det_candidates]
+                stage3_det_labels = det_labels[det_candidates]
+                valid3 = self._stage3_candidate_mask(stage3_pred_boxes, stage3_track_labels, stage3_det_boxes, stage3_det_labels)
+                stage3_iou = self._stage3_iou_matrix(stage3_pred_boxes, stage3_det_boxes)
+                stage3_matches = hungarian_assign(1.0 - stage3_iou, valid3)
+                for local_track_idx, local_det_idx in stage3_matches:
+                    track_idx = int(track_candidates[local_track_idx])
+                    det_idx = int(det_candidates[local_det_idx])
                     if track_idx in matched_track_ids or det_idx in matched_det_ids:
                         continue
+                    if stage3_iou[local_track_idx, local_det_idx] < self.match_iou:
+                        pred_center = stage3_pred_boxes[local_track_idx, 0:2]
+                        det_center = stage3_det_boxes[local_det_idx, 0:2]
+                        if np.linalg.norm(pred_center - det_center) > self.fallback_center_gate:
+                            continue
                     self._update_track(track_idx, det_idx, dets, status='fragile')
                     matched_track_ids.add(track_idx)
                     matched_det_ids.add(det_idx)
@@ -426,7 +437,7 @@ class UDCAPolicyTracker:
                 'pred_label': int(track.label),
                 'pred_score': float(track.score),
                 'missed': int(track.missed),
-                'status': track.status,
+                'status': self.track_meta.get(track.track_id, {}).get('status', 'fragile'),
             })
         return outputs
 
