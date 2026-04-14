@@ -1,0 +1,11 @@
+IMAGESETS_DIR: ImageSets
+
+POINT_FEATURES: 4
+POINT_CLOUD_SUFFIX: .bin
+IMAGE_SUFFIX: .png
+
+PATHS:
+    POINT_CLOUD_DIRNAME: training/velodyne
+    IMAGE_DIRNAME: training/image_02
+    CALIB_DIRNAME: training/calib
+    LABEL_DIRNAME: training
