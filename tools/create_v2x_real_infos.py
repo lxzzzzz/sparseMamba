@@ -134,6 +134,7 @@ def build_label_cache(root_path, sequence_id, format_cfg):
 
 def merge_frame_annos(labels_by_camera, frame_idx, tolerance):
     merged = {}
+    conflict_messages = []
 
     for cam_id in CAMERA_IDS:
         for anno in labels_by_camera[cam_id].get(frame_idx, []):
@@ -151,10 +152,14 @@ def merge_frame_annos(labels_by_camera, frame_idx, tolerance):
 
             existing = merged[key]
             if not np.allclose(existing['gt_boxes_lidar'], anno['gt_boxes_lidar'], atol=tolerance, rtol=0.0):
-                raise ValueError(
-                    f'Inconsistent lidar box for frame={frame_idx}, track_id={anno["track_id"]}, '
-                    f'class={anno["name"]}, cameras={existing["source_camera"]}/{cam_id}'
+                conflict_messages.append(
+                    f'Warning: inconsistent lidar box for frame={frame_idx}, track_id={anno["track_id"]}, '
+                    f'class={anno["name"]}, cameras={existing["source_camera"]}/{cam_id}; '
+                    f'keeping camera {existing["source_camera"]} by priority'
                 )
+
+    for message in conflict_messages:
+        print(message)
 
     return [merged[key] for key in sorted(merged.keys(), key=lambda item: item[0])]
 
