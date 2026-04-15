@@ -1,5 +1,6 @@
 import _init_path
 import argparse
+import ast
 import json
 import pickle
 import time
@@ -8,7 +9,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
+from easydict import EasyDict
 
+from pcdet.config import cfg_from_yaml_file
 from pcdet.tracking.utils import (
     association_quality,
     compose_quality_scalar,
@@ -434,6 +437,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description='Uncertainty-Driven Cross-Modal Cascaded Association policy evaluation')
     parser.add_argument('--cache_dir', type=str, required=True, help='detector cache root')
     parser.add_argument('--gt_pkl', type=str, required=True, help='ground-truth pkl, e.g. tracking_infos_val.pkl')
+    parser.add_argument('--data_cfg', type=str, default=None, help='optional data/detector yaml used to resolve default BEV range')
     parser.add_argument('--class_names', nargs='+', default=['Car', 'Pedestrian', 'Cyclist'])
     parser.add_argument('--score_thresh', type=float, default=0.1)
     parser.add_argument('--match_iou', type=float, default=0.1)
@@ -443,8 +447,12 @@ def parse_args():
     parser.add_argument('--max_age', type=int, default=2)
     parser.add_argument('--min_hits', type=int, default=2)
     parser.add_argument('--max_distance', type=float, default=100.0, help='evaluate and track targets within XY range only')
-    parser.add_argument('--bev_range', type=float, nargs=4, default=None, metavar=('X_MIN', 'Y_MIN', 'X_MAX', 'Y_MAX'),
-                        help='optional BEV evaluation range [x_min, y_min, x_max, y_max] in lidar coordinates')
+    parser.add_argument(
+        '--bev_range',
+        type=str,
+        default=None,
+        help='optional BEV range, e.g. "[-40.96, -28.16, 40.96, 28.16]"; overrides --max_distance when provided',
+    )
     parser.add_argument('--u3d_high', type=float, default=0.55, help='high 3D uncertainty threshold')
     parser.add_argument('--u2d_high', type=float, default=0.55, help='high 2D uncertainty threshold')
     parser.add_argument('--rescue_min_visual_conf', type=float, default=0.35, help='minimum visual confidence for stage-2 rescue')
@@ -454,6 +462,44 @@ def parse_args():
     return parser.parse_args()
 
 
+def parse_bev_range_arg(raw_value):
+    if raw_value is None:
+        return None
+    if isinstance(raw_value, (list, tuple, np.ndarray)):
+        return normalize_bev_range(raw_value)
+
+    text = str(raw_value).strip()
+    if not text:
+        return None
+    if text[0] in '[(':
+        values = ast.literal_eval(text)
+    else:
+        values = [float(item) for item in text.replace(',', ' ').split()]
+    return normalize_bev_range(values)
+
+
+def load_default_bev_range_from_cfg(cfg_file):
+    if cfg_file is None:
+        return None
+    cfg = EasyDict()
+    cfg_from_yaml_file(cfg_file, cfg)
+    pc_range = None
+    if 'POINT_CLOUD_RANGE' in cfg:
+        pc_range = cfg.POINT_CLOUD_RANGE
+    elif 'DATA_CONFIG' in cfg and 'POINT_CLOUD_RANGE' in cfg.DATA_CONFIG:
+        pc_range = cfg.DATA_CONFIG.POINT_CLOUD_RANGE
+    if pc_range is None:
+        return None
+    return normalize_bev_range([pc_range[0], pc_range[1], pc_range[3], pc_range[4]])
+
+
+def resolve_spatial_filter(args):
+    cli_bev_range = parse_bev_range_arg(args.bev_range)
+    if cli_bev_range is not None:
+        return None, cli_bev_range
+    return args.max_distance, load_default_bev_range_from_cfg(args.data_cfg)
+
+
 def main():
     args = parse_args()
     from pcdet.tracking.metrics import TrackingMetrics
@@ -461,6 +507,7 @@ def main():
     cache_dir = Path(args.cache_dir)
     save_dir = Path(args.save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
+    effective_max_distance, effective_bev_range = resolve_spatial_filter(args)
 
     frame_infos = load_pickle(args.gt_pkl)
     frame_infos.sort(key=lambda info: (str(info['sequence_id']), int(info['frame_idx'])))
@@ -476,8 +523,8 @@ def main():
         center_gate=args.center_gate,
         rescue_center_gate=args.rescue_center_gate,
         fallback_center_gate=args.fallback_center_gate,
-        max_distance=args.max_distance,
-        bev_range=args.bev_range,
+        max_distance=effective_max_distance,
+        bev_range=effective_bev_range,
         u3d_high=args.u3d_high,
         u2d_high=args.u2d_high,
         rescue_min_visual_conf=args.rescue_min_visual_conf,
@@ -508,14 +555,14 @@ def main():
             gt_ids = np.asarray(gt_annos.get('track_id', []), dtype=np.int64)
             gt_labels = class_names_to_labels(args.class_names, gt_annos.get('name', []))
             gt_boxes, gt_ids, gt_labels = filter_boxes_by_spatial_range(
-                gt_boxes, gt_ids, gt_labels, max_distance=args.max_distance, bev_range=args.bev_range
+                gt_boxes, gt_ids, gt_labels, max_distance=effective_max_distance, bev_range=effective_bev_range
             )
 
             pred_boxes = np.asarray([item['pred_box'] for item in outputs], dtype=np.float32).reshape(-1, 7)
             pred_ids = np.asarray([item['track_id'] for item in outputs], dtype=np.int64)
             pred_labels = np.asarray([item['pred_label'] for item in outputs], dtype=np.int64)
             pred_boxes, pred_ids, pred_labels = filter_boxes_by_spatial_range(
-                pred_boxes, pred_ids, pred_labels, max_distance=args.max_distance, bev_range=args.bev_range
+                pred_boxes, pred_ids, pred_labels, max_distance=effective_max_distance, bev_range=effective_bev_range
             )
             metrics.update(sequence_id, gt_boxes, gt_ids, gt_labels, pred_boxes, pred_ids, pred_labels)
 
@@ -530,8 +577,8 @@ def main():
         elapsed=time.perf_counter() - start_time,
         stage_stats=stage_stats,
     )
-    metric_dict['max_distance'] = None if args.max_distance is None else float(args.max_distance)
-    metric_dict['bev_range'] = None if args.bev_range is None else [float(v) for v in normalize_bev_range(args.bev_range).tolist()]
+    metric_dict['max_distance'] = None if effective_max_distance is None else float(effective_max_distance)
+    metric_dict['bev_range'] = None if effective_bev_range is None else [float(v) for v in effective_bev_range.tolist()]
     with open(save_dir / 'udca_policy_metrics.json', 'w') as f:
         json.dump(metric_dict, f, indent=2)
     with open(save_dir / 'udca_policy_results.pkl', 'wb') as f:
@@ -547,8 +594,8 @@ def main():
     print(f'fallback_center_gate: {args.fallback_center_gate}')
     print(f'max_age: {args.max_age}')
     print(f'min_hits: {args.min_hits}')
-    print(f'max_distance: {args.max_distance}')
-    print(f'bev_range: {None if args.bev_range is None else [float(v) for v in normalize_bev_range(args.bev_range).tolist()]}')
+    print(f'max_distance: {effective_max_distance}')
+    print(f'bev_range: {None if effective_bev_range is None else [float(v) for v in effective_bev_range.tolist()]}')
     print(f'u3d_high: {args.u3d_high}')
     print(f'u2d_high: {args.u2d_high}')
     print(f'rescue_min_visual_conf: {args.rescue_min_visual_conf}')

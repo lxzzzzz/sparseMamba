@@ -1,19 +1,24 @@
 import _init_path
 import argparse
+import ast
 import pickle
 from pathlib import Path
 
 import numpy as np
+from easydict import EasyDict
 
+from pcdet.config import cfg_from_yaml_file
 from pcdet.datasets.kitti import kitti_utils
 from pcdet.datasets.kitti.kitti_object_eval_python.eval import get_official_eval_result
 from pcdet.tracking.cache import load_frame_cache
+from pcdet.tracking.utils import filter_boxes_by_spatial_range, normalize_bev_range
 
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Evaluate tracking detector cache with KITTI BEV/3D metrics')
     parser.add_argument('--data_root', type=str, required=True, help='tracking dataset root')
     parser.add_argument('--cache_dir', type=str, required=True, help='detector cache root')
+    parser.add_argument('--data_cfg', type=str, default=None, help='optional data/detector yaml used to resolve default BEV range')
     parser.add_argument('--split', type=str, default='val', choices=['train', 'val', 'test'])
     parser.add_argument(
         '--tracking_info',
@@ -28,6 +33,13 @@ def parse_args():
     parser.add_argument('--gt_sequence_key', type=str, default='sequence_id')
     parser.add_argument('--gt_frame_idx_key', type=str, default='frame_idx')
     parser.add_argument('--gt_frame_id_key', type=str, default='frame_id')
+    parser.add_argument('--max_distance', type=float, default=100.0, help='evaluate targets within XY range only')
+    parser.add_argument(
+        '--bev_range',
+        type=str,
+        default=None,
+        help='optional BEV range, e.g. "[-40.96, -28.16, 40.96, 28.16]"; overrides --max_distance when provided',
+    )
     parser.add_argument('--save_dir', type=str, default=None)
     return parser.parse_args()
 
@@ -115,7 +127,45 @@ def build_empty_anno():
     }
 
 
-def build_gt_annos(tracking_infos, gt_infos, args):
+def parse_bev_range_arg(raw_value):
+    if raw_value is None:
+        return None
+    if isinstance(raw_value, (list, tuple, np.ndarray)):
+        return normalize_bev_range(raw_value)
+
+    text = str(raw_value).strip()
+    if not text:
+        return None
+    if text[0] in '[(':
+        values = ast.literal_eval(text)
+    else:
+        values = [float(item) for item in text.replace(',', ' ').split()]
+    return normalize_bev_range(values)
+
+
+def load_default_bev_range_from_cfg(cfg_file):
+    if cfg_file is None:
+        return None
+    cfg = EasyDict()
+    cfg_from_yaml_file(cfg_file, cfg)
+    pc_range = None
+    if 'POINT_CLOUD_RANGE' in cfg:
+        pc_range = cfg.POINT_CLOUD_RANGE
+    elif 'DATA_CONFIG' in cfg and 'POINT_CLOUD_RANGE' in cfg.DATA_CONFIG:
+        pc_range = cfg.DATA_CONFIG.POINT_CLOUD_RANGE
+    if pc_range is None:
+        return None
+    return normalize_bev_range([pc_range[0], pc_range[1], pc_range[3], pc_range[4]])
+
+
+def resolve_spatial_filter(args):
+    cli_bev_range = parse_bev_range_arg(args.bev_range)
+    if cli_bev_range is not None:
+        return None, cli_bev_range
+    return args.max_distance, load_default_bev_range_from_cfg(args.data_cfg)
+
+
+def build_gt_annos(tracking_infos, gt_infos, args, max_distance=None, bev_range=None):
     gt_by_idx, gt_by_id = build_gt_index(gt_infos, args)
     gt_annos = []
 
@@ -135,15 +185,21 @@ def build_gt_annos(tracking_infos, gt_infos, args):
             continue
 
         keep = filter_class_mask(names, args.class_names)
+        filtered_boxes, filtered_names = filter_boxes_by_spatial_range(
+            boxes[keep].astype(np.float32),
+            names[keep],
+            max_distance=max_distance,
+            bev_range=bev_range,
+        )
         gt_annos.append({
-            'name': names[keep],
-            'gt_boxes_lidar': boxes[keep].astype(np.float32),
+            'name': filtered_names,
+            'gt_boxes_lidar': filtered_boxes,
         })
 
     return gt_annos
 
 
-def build_dt_annos(tracking_infos, cache_root, class_names):
+def build_dt_annos(tracking_infos, cache_root, class_names, max_distance=None, bev_range=None):
     dt_annos = []
     for info in tracking_infos:
         frame_cache = load_frame_cache(cache_root, info['sequence_id'], info['frame_idx'])
@@ -155,6 +211,9 @@ def build_dt_annos(tracking_infos, cache_root, class_names):
         pred_boxes = pred_boxes[valid]
         pred_scores = pred_scores[valid]
         pred_labels = pred_labels[valid]
+        pred_boxes, pred_scores, pred_labels = filter_boxes_by_spatial_range(
+            pred_boxes, pred_scores, pred_labels, max_distance=max_distance, bev_range=bev_range
+        )
 
         if pred_boxes.shape[0] == 0:
             dt_annos.append({
@@ -193,12 +252,13 @@ def main():
     data_root = Path(args.data_root)
     cache_root = Path(args.cache_dir)
     tracking_info_path = Path(args.tracking_info) if args.tracking_info else data_root / f'tracking_infos_{args.split}.pkl'
+    effective_max_distance, effective_bev_range = resolve_spatial_filter(args)
 
     tracking_infos = load_pickle(tracking_info_path)
     gt_infos = load_pickle(args.gt_pkl)
 
-    gt_annos = build_gt_annos(tracking_infos, gt_infos, args)
-    dt_annos = build_dt_annos(tracking_infos, cache_root, args.class_names)
+    gt_annos = build_gt_annos(tracking_infos, gt_infos, args, max_distance=effective_max_distance, bev_range=effective_bev_range)
+    dt_annos = build_dt_annos(tracking_infos, cache_root, args.class_names, max_distance=effective_max_distance, bev_range=effective_bev_range)
 
     map_name_to_kitti = {name: name for name in args.class_names}
     eval_gt_annos = kitti_utils.transform_annotations_to_kitti_format(gt_annos, map_name_to_kitti=map_name_to_kitti)
@@ -213,6 +273,8 @@ def main():
     print(f'tracking_info: {tracking_info_path}')
     print(f'gt_pkl: {args.gt_pkl}')
     print(f'cache_dir: {cache_root}')
+    print(f'max_distance: {effective_max_distance}')
+    print(f'bev_range: {None if effective_bev_range is None else [float(v) for v in effective_bev_range.tolist()]}')
     print(bev_3d_str)
 
     if args.save_dir is not None:
