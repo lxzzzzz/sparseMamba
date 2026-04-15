@@ -15,7 +15,10 @@ MODEL:
 
     MAP_TO_BEV:
         NAME: HeightCompression
-        NUM_BEV_FEATURES: 256
+        # For POINT_CLOUD_RANGE z in [-15, 15] with VOXEL_SIZE[2]=0.1, VoxelBackBone8x
+        # currently produces encoded BEV depth D=18, so HeightCompression outputs 128 * 18 = 2304 channels.
+        # This value is used as the input channel count for BACKBONE_2D construction.
+        NUM_BEV_FEATURES: 2304
 
     BACKBONE_2D:
         NAME: BaseBEVBackbone
