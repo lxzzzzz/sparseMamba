@@ -544,27 +544,33 @@ def resolve_spatial_filter(args):
     return args.max_distance, load_default_bev_range_from_cfg(args.data_cfg)
 
 
+def preset_override(args, key, value, default_value):
+    if getattr(args, key) == default_value:
+        setattr(args, key, value)
+
+
 def apply_dataset_preset(args):
     if args.dataset_preset == 'default':
         return args
 
     if args.dataset_preset == 'v2x_xian_2hz':
         # Tuned from label_val GT motion statistics: constant velocity is notably more stable than acceleration.
-        args.match_iou = 0.01
-        args.center_gate = 20.0
-        args.rescue_center_gate = 28.0
-        args.fallback_center_gate = 22.0
-        args.max_age = 4
-        args.min_hits = 2
-        args.motion_model = 'constant_velocity'
-        args.motion_horizon = 1.0
-        args.velocity_momentum = 0.60
-        args.accel_gain = 0.0
-        args.max_speed = 30.0
-        args.u3d_high = 0.70
-        args.u2d_high = 0.70
-        args.rescue_min_visual_conf = 0.20
-        args.score_thresh = max(float(args.score_thresh), 0.1)
+        preset_override(args, 'match_iou', 0.01, 0.1)
+        preset_override(args, 'center_gate', 20.0, 8.0)
+        preset_override(args, 'rescue_center_gate', 28.0, 12.0)
+        preset_override(args, 'fallback_center_gate', 22.0, 8.0)
+        preset_override(args, 'max_age', 4, 2)
+        preset_override(args, 'min_hits', 2, 2)
+        preset_override(args, 'motion_model', 'constant_velocity', 'constant_velocity')
+        preset_override(args, 'motion_horizon', 1.0, 1.0)
+        preset_override(args, 'velocity_momentum', 0.60, 0.0)
+        preset_override(args, 'accel_gain', 0.0, 0.0)
+        preset_override(args, 'max_speed', 30.0, 100.0)
+        preset_override(args, 'u3d_high', 0.70, 0.55)
+        preset_override(args, 'u2d_high', 0.70, 0.55)
+        preset_override(args, 'rescue_min_visual_conf', 0.20, 0.35)
+        if float(args.score_thresh) < 0.1:
+            args.score_thresh = 0.1
         return args
 
     raise ValueError(f'Unsupported dataset_preset: {args.dataset_preset}')
