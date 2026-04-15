@@ -1,7 +1,7 @@
 DATASET: 'KittiTrackingFrameDataset'
 DATA_PATH: 'data/v2x_xian'
 
-POINT_CLOUD_RANGE: [0, -51.2, -5, 102.4, 51.2, 3]
+POINT_CLOUD_RANGE: [0, -20, -4.5, 120, 30, 10.5]
 
 DATA_SPLIT: {
     'train': train,

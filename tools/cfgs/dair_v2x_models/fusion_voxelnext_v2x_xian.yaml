@@ -8,7 +8,7 @@ MODEL:
     NAME: FusionVoxelNeXt
 
     VOXEL_SIZE: [0.16, 0.16, 0.1]
-    POINT_CLOUD_RANGE: [0, -51.2, -5, 102.4, 51.2, 3]
+    POINT_CLOUD_RANGE: [0, -20, -4.5, 120, 30, 10.5]
 
     VFE:
         NAME: MeanVFE
@@ -16,7 +16,7 @@ MODEL:
     BACKBONE_3D:
         NAME: VoxelNeXtFusion
         VOXEL_SIZE: [0.16, 0.16, 0.1]
-        POINT_CLOUD_RANGE: [0, -51.2, -5, 102.4, 51.2, 3]
+        POINT_CLOUD_RANGE: [0, -20, -4.5, 120, 30, 10.5]
         SPCONV_KERNEL_SIZES: [3, 3, 3, 3]
         CHANNELS: [16, 32, 64, 128, 128]
         OUT_CHANNEL: 128
@@ -66,7 +66,7 @@ MODEL:
             }
         POST_PROCESSING:
             SCORE_THRESH: 0.1
-            POST_CENTER_LIMIT_RANGE: [-10, -61.2, -10.0, 112.4, 61.2, 10.0]
+            POST_CENTER_LIMIT_RANGE: [0, -20, -4.5, 120, 30, 10.5]
             MAX_OBJ_PER_SAMPLE: 500
             NMS_CONFIG:
                 NMS_TYPE: nms_gpu
