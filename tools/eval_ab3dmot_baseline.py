@@ -27,10 +27,25 @@ class TrackState:
     missed: int
     last_box: np.ndarray
     velocity_xy: np.ndarray
+    prev_velocity_xy: np.ndarray
 
 
 class AB3DMOTBaseline:
-    def __init__(self, max_age=2, min_hits=2, match_iou=0.1, score_thresh=0.1, center_gate=8.0, max_distance=None, bev_range=None):
+    def __init__(
+        self,
+        max_age=2,
+        min_hits=2,
+        match_iou=0.1,
+        score_thresh=0.1,
+        center_gate=8.0,
+        max_distance=None,
+        bev_range=None,
+        motion_model='constant_velocity',
+        motion_horizon=1.0,
+        velocity_momentum=0.0,
+        accel_gain=0.0,
+        max_speed=100.0,
+    ):
         self.max_age = int(max_age)
         self.min_hits = int(min_hits)
         self.match_iou = float(match_iou)
@@ -38,8 +53,20 @@ class AB3DMOTBaseline:
         self.center_gate = float(center_gate)
         self.max_distance = None if max_distance is None else float(max_distance)
         self.bev_range = normalize_bev_range(bev_range)
+        self.motion_model = str(motion_model)
+        self.motion_horizon = float(motion_horizon)
+        self.velocity_momentum = float(velocity_momentum)
+        self.accel_gain = float(accel_gain)
+        self.max_speed = float(max_speed)
         self.next_track_id = 1
         self.tracks = []
+
+    def _clip_velocity(self, velocity_xy):
+        velocity_xy = np.asarray(velocity_xy, dtype=np.float32)
+        speed = np.linalg.norm(velocity_xy)
+        if speed <= self.max_speed or speed <= 1e-6:
+            return velocity_xy
+        return velocity_xy * (self.max_speed / speed)
 
     def _predict_boxes(self):
         if len(self.tracks) == 0:
@@ -47,7 +74,13 @@ class AB3DMOTBaseline:
         predicted = []
         for track in self.tracks:
             box = track.last_box.copy()
-            box[0:2] += track.velocity_xy
+            steps_ahead = max(float(track.missed), 1.0) * self.motion_horizon
+            velocity_xy = self._clip_velocity(track.velocity_xy)
+            motion_delta = velocity_xy * steps_ahead
+            if self.motion_model == 'const_accel':
+                accel_xy = self._clip_velocity(track.velocity_xy - track.prev_velocity_xy)
+                motion_delta = motion_delta + 0.5 * self.accel_gain * accel_xy * (steps_ahead ** 2)
+            box[0:2] += motion_delta
             predicted.append(box)
         return np.stack(predicted, axis=0).astype(np.float32)
 
@@ -104,7 +137,14 @@ class AB3DMOTBaseline:
             track = self.tracks[track_idx]
             prev_box = track.last_box.copy()
             new_box = det_boxes[det_idx].copy()
-            track.velocity_xy = new_box[0:2] - prev_box[0:2]
+            measured_velocity = self._clip_velocity(new_box[0:2] - prev_box[0:2])
+            prev_velocity_xy = track.velocity_xy.copy()
+            smoothed_velocity = (
+                self.velocity_momentum * prev_velocity_xy
+                + (1.0 - self.velocity_momentum) * measured_velocity
+            )
+            track.prev_velocity_xy = prev_velocity_xy
+            track.velocity_xy = self._clip_velocity(smoothed_velocity)
             track.last_box = new_box
             track.score = float(det_scores[det_idx])
             track.hits += 1
@@ -130,6 +170,7 @@ class AB3DMOTBaseline:
                     missed=0,
                     last_box=det_boxes[det_idx].copy(),
                     velocity_xy=np.zeros((2,), dtype=np.float32),
+                    prev_velocity_xy=np.zeros((2,), dtype=np.float32),
                 )
             )
             self.next_track_id += 1
@@ -166,6 +207,11 @@ def parse_args():
     parser.add_argument('--center_gate', type=float, default=8.0)
     parser.add_argument('--max_age', type=int, default=2)
     parser.add_argument('--min_hits', type=int, default=2)
+    parser.add_argument('--motion_model', type=str, default='constant_velocity', choices=['constant_velocity', 'const_accel'])
+    parser.add_argument('--motion_horizon', type=float, default=1.0, help='prediction horizon in frame units')
+    parser.add_argument('--velocity_momentum', type=float, default=0.0, help='EMA momentum for measured velocity updates')
+    parser.add_argument('--accel_gain', type=float, default=0.0, help='acceleration gain used only for const_accel motion model')
+    parser.add_argument('--max_speed', type=float, default=100.0, help='maximum per-frame XY displacement allowed in motion prediction')
     parser.add_argument('--max_distance', type=float, default=100.0, help='evaluate and track targets within XY range only')
     parser.add_argument(
         '--bev_range',
@@ -235,6 +281,11 @@ def apply_dataset_preset(args):
         args.center_gate = 20.0
         args.max_age = 4
         args.min_hits = 2
+        args.motion_model = 'const_accel'
+        args.motion_horizon = 1.0
+        args.velocity_momentum = 0.35
+        args.accel_gain = 0.30
+        args.max_speed = 30.0
         args.score_thresh = max(float(args.score_thresh), 0.1)
         return args
 
@@ -263,6 +314,11 @@ def main():
         center_gate=args.center_gate,
         max_distance=effective_max_distance,
         bev_range=effective_bev_range,
+        motion_model=args.motion_model,
+        motion_horizon=args.motion_horizon,
+        velocity_momentum=args.velocity_momentum,
+        accel_gain=args.accel_gain,
+        max_speed=args.max_speed,
     )
     metrics = TrackingMetrics(iou_threshold=args.match_iou)
     results = {}
@@ -343,6 +399,11 @@ def main():
     print(f'score_thresh: {args.score_thresh}')
     print(f'match_iou: {args.match_iou}')
     print(f'center_gate: {args.center_gate}')
+    print(f'motion_model: {args.motion_model}')
+    print(f'motion_horizon: {args.motion_horizon}')
+    print(f'velocity_momentum: {args.velocity_momentum}')
+    print(f'accel_gain: {args.accel_gain}')
+    print(f'max_speed: {args.max_speed}')
     print(f'max_age: {args.max_age}')
     print(f'min_hits: {args.min_hits}')
     print(f'max_distance: {args.max_distance}')

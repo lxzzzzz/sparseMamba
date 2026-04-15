@@ -96,6 +96,7 @@ class TrackState:
     missed: int
     last_box: np.ndarray
     velocity_xy: np.ndarray
+    prev_velocity_xy: np.ndarray
 
 
 class UDCAPolicyTracker:
@@ -115,6 +116,11 @@ class UDCAPolicyTracker:
         rescue_min_visual_conf=0.35,
         disable_stage2=False,
         disable_stage3=False,
+        motion_model='constant_velocity',
+        motion_horizon=1.0,
+        velocity_momentum=0.0,
+        accel_gain=0.0,
+        max_speed=100.0,
     ):
         self.max_age = int(max_age)
         self.min_hits = int(min_hits)
@@ -130,6 +136,11 @@ class UDCAPolicyTracker:
         self.rescue_min_visual_conf = float(rescue_min_visual_conf)
         self.disable_stage2 = bool(disable_stage2)
         self.disable_stage3 = bool(disable_stage3)
+        self.motion_model = str(motion_model)
+        self.motion_horizon = float(motion_horizon)
+        self.velocity_momentum = float(velocity_momentum)
+        self.accel_gain = float(accel_gain)
+        self.max_speed = float(max_speed)
         self.next_track_id = 1
         self.tracks = []
         self.track_meta = {}
@@ -141,13 +152,26 @@ class UDCAPolicyTracker:
         self.track_meta = {}
         self.stage_stats = defaultdict(int)
 
+    def _clip_velocity(self, velocity_xy):
+        velocity_xy = np.asarray(velocity_xy, dtype=np.float32)
+        speed = np.linalg.norm(velocity_xy)
+        if speed <= self.max_speed or speed <= 1e-6:
+            return velocity_xy
+        return velocity_xy * (self.max_speed / speed)
+
     def _predict_boxes(self):
         if len(self.tracks) == 0:
             return np.zeros((0, 7), dtype=np.float32)
         predicted = []
         for track in self.tracks:
             box = track.last_box.copy()
-            box[0:2] += track.velocity_xy
+            steps_ahead = max(float(track.missed), 1.0) * self.motion_horizon
+            velocity_xy = self._clip_velocity(track.velocity_xy)
+            motion_delta = velocity_xy * steps_ahead
+            if self.motion_model == 'const_accel':
+                accel_xy = self._clip_velocity(track.velocity_xy - track.prev_velocity_xy)
+                motion_delta = motion_delta + 0.5 * self.accel_gain * accel_xy * (steps_ahead ** 2)
+            box[0:2] += motion_delta
             predicted.append(box)
         return np.stack(predicted, axis=0).astype(np.float32)
 
@@ -290,7 +314,14 @@ class UDCAPolicyTracker:
         track = self.tracks[track_idx]
         prev_box = track.last_box.copy()
         new_box = dets['boxes'][det_idx].copy()
-        track.velocity_xy = new_box[0:2] - prev_box[0:2]
+        measured_velocity = self._clip_velocity(new_box[0:2] - prev_box[0:2])
+        prev_velocity_xy = track.velocity_xy.copy()
+        smoothed_velocity = (
+            self.velocity_momentum * prev_velocity_xy
+            + (1.0 - self.velocity_momentum) * measured_velocity
+        )
+        track.prev_velocity_xy = prev_velocity_xy
+        track.velocity_xy = self._clip_velocity(smoothed_velocity)
         track.last_box = new_box
         track.score = float(dets['scores'][det_idx])
         track.hits += 1
@@ -312,6 +343,7 @@ class UDCAPolicyTracker:
                 missed=0,
                 last_box=dets['boxes'][det_idx].copy(),
                 velocity_xy=np.zeros((2,), dtype=np.float32),
+                prev_velocity_xy=np.zeros((2,), dtype=np.float32),
             )
         )
         self.track_meta[track_id] = {
@@ -453,6 +485,11 @@ def parse_args():
     parser.add_argument('--fallback_center_gate', type=float, default=8.0)
     parser.add_argument('--max_age', type=int, default=2)
     parser.add_argument('--min_hits', type=int, default=2)
+    parser.add_argument('--motion_model', type=str, default='constant_velocity', choices=['constant_velocity', 'const_accel'])
+    parser.add_argument('--motion_horizon', type=float, default=1.0, help='prediction horizon in frame units')
+    parser.add_argument('--velocity_momentum', type=float, default=0.0, help='EMA momentum for measured velocity updates')
+    parser.add_argument('--accel_gain', type=float, default=0.0, help='acceleration gain used only for const_accel motion model')
+    parser.add_argument('--max_speed', type=float, default=100.0, help='maximum per-frame XY displacement allowed in motion prediction')
     parser.add_argument('--max_distance', type=float, default=100.0, help='evaluate and track targets within XY range only')
     parser.add_argument(
         '--bev_range',
@@ -519,6 +556,11 @@ def apply_dataset_preset(args):
         args.fallback_center_gate = 22.0
         args.max_age = 4
         args.min_hits = 2
+        args.motion_model = 'const_accel'
+        args.motion_horizon = 1.0
+        args.velocity_momentum = 0.35
+        args.accel_gain = 0.30
+        args.max_speed = 30.0
         args.u3d_high = 0.70
         args.u2d_high = 0.70
         args.rescue_min_visual_conf = 0.20
@@ -559,6 +601,11 @@ def main():
         rescue_min_visual_conf=args.rescue_min_visual_conf,
         disable_stage2=args.disable_stage2,
         disable_stage3=args.disable_stage3,
+        motion_model=args.motion_model,
+        motion_horizon=args.motion_horizon,
+        velocity_momentum=args.velocity_momentum,
+        accel_gain=args.accel_gain,
+        max_speed=args.max_speed,
     )
     metrics = TrackingMetrics(iou_threshold=args.match_iou)
     results = {}
@@ -622,6 +669,11 @@ def main():
     print(f'center_gate: {args.center_gate}')
     print(f'rescue_center_gate: {args.rescue_center_gate}')
     print(f'fallback_center_gate: {args.fallback_center_gate}')
+    print(f'motion_model: {args.motion_model}')
+    print(f'motion_horizon: {args.motion_horizon}')
+    print(f'velocity_momentum: {args.velocity_momentum}')
+    print(f'accel_gain: {args.accel_gain}')
+    print(f'max_speed: {args.max_speed}')
     print(f'max_age: {args.max_age}')
     print(f'min_hits: {args.min_hits}')
     print(f'max_distance: {effective_max_distance}')
