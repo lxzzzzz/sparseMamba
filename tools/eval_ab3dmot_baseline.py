@@ -153,6 +153,13 @@ def parse_args():
     parser.add_argument('--cache_dir', type=str, required=True, help='detector cache root')
     parser.add_argument('--gt_pkl', type=str, required=True, help='ground-truth pkl, e.g. tracking_infos_val.pkl')
     parser.add_argument('--data_cfg', type=str, default=None, help='optional data/detector yaml used to resolve default BEV range')
+    parser.add_argument(
+        '--dataset_preset',
+        type=str,
+        default='default',
+        choices=['default', 'v2x_xian_2hz'],
+        help='optional dataset-specific eval preset; only applied when explicitly requested',
+    )
     parser.add_argument('--class_names', nargs='+', default=['Car', 'Pedestrian', 'Cyclist'])
     parser.add_argument('--score_thresh', type=float, default=0.1)
     parser.add_argument('--match_iou', type=float, default=0.1)
@@ -218,8 +225,25 @@ def resolve_spatial_filter(args):
     return args.max_distance, load_default_bev_range_from_cfg(args.data_cfg)
 
 
+def apply_dataset_preset(args):
+    if args.dataset_preset == 'default':
+        return args
+
+    if args.dataset_preset == 'v2x_xian_2hz':
+        # Low-frame-rate highway traffic needs a much wider motion gate than the default settings.
+        args.match_iou = 0.01
+        args.center_gate = 20.0
+        args.max_age = 4
+        args.min_hits = 2
+        args.score_thresh = max(float(args.score_thresh), 0.1)
+        return args
+
+    raise ValueError(f'Unsupported dataset_preset: {args.dataset_preset}')
+
+
 def main():
     args = parse_args()
+    args = apply_dataset_preset(args)
     cache_dir = Path(args.cache_dir)
     save_dir = Path(args.save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
@@ -315,6 +339,7 @@ def main():
     print('================ AB3DMOT-Style Baseline ================')
     print(f'cache_dir: {cache_dir}')
     print(f'gt_pkl: {args.gt_pkl}')
+    print(f'dataset_preset: {args.dataset_preset}')
     print(f'score_thresh: {args.score_thresh}')
     print(f'match_iou: {args.match_iou}')
     print(f'center_gate: {args.center_gate}')

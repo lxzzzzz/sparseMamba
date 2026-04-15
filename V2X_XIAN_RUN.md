@@ -100,6 +100,7 @@ python tools/eval_ab3dmot_baseline.py \
   --cache_dir cache/v2x_xian/fusion_val \
   --gt_pkl data/v2x_xian/tracking_infos_val.pkl \
   --data_cfg tools/cfgs/dataset_configs/v2x_xian_tracking_frame_dataset.yaml \
+  --dataset_preset v2x_xian_2hz \
   --class_names Car \
   --save_dir output/tracking_eval/v2x_xian/ab3dmot_fusion
 ```
@@ -111,6 +112,7 @@ python tools/eval_udca_policy.py \
   --cache_dir cache/v2x_xian/fusion_val \
   --gt_pkl data/v2x_xian/tracking_infos_val.pkl \
   --data_cfg tools/cfgs/dataset_configs/v2x_xian_tracking_frame_dataset.yaml \
+  --dataset_preset v2x_xian_2hz \
   --class_names Car \
   --save_dir output/tracking_eval/v2x_xian/udca_fusion
 ```
