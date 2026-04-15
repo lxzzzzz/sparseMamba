@@ -276,15 +276,15 @@ def apply_dataset_preset(args):
         return args
 
     if args.dataset_preset == 'v2x_xian_2hz':
-        # Low-frame-rate highway traffic needs a much wider motion gate than the default settings.
+        # Tuned from label_val GT motion statistics: constant velocity is notably more stable than acceleration.
         args.match_iou = 0.01
         args.center_gate = 20.0
         args.max_age = 4
         args.min_hits = 2
-        args.motion_model = 'const_accel'
+        args.motion_model = 'constant_velocity'
         args.motion_horizon = 1.0
-        args.velocity_momentum = 0.35
-        args.accel_gain = 0.30
+        args.velocity_momentum = 0.60
+        args.accel_gain = 0.0
         args.max_speed = 30.0
         args.score_thresh = max(float(args.score_thresh), 0.1)
         return args
