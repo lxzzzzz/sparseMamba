@@ -3,6 +3,18 @@ import torch
 import torch.nn as nn
 
 
+def _align_upsample_features(ups):
+    if len(ups) <= 1:
+        return ups
+
+    target_h = min(x.shape[2] for x in ups)
+    target_w = min(x.shape[3] for x in ups)
+    if all(x.shape[2] == target_h and x.shape[3] == target_w for x in ups):
+        return ups
+
+    return [x[:, :, :target_h, :target_w] for x in ups]
+
+
 class BaseBEVBackbone(nn.Module):
     def __init__(self, model_cfg, input_channels):
         super().__init__()
@@ -99,6 +111,7 @@ class BaseBEVBackbone(nn.Module):
             else:
                 ups.append(x)
 
+        ups = _align_upsample_features(ups)
         if len(ups) > 1:
             x = torch.cat(ups, dim=1)
         elif len(ups) == 1:
@@ -338,6 +351,7 @@ class BaseBEVResBackbone(nn.Module):
             else:
                 ups.append(x)
 
+        ups = _align_upsample_features(ups)
         if len(ups) > 1:
             x = torch.cat(ups, dim=1)
         elif len(ups) == 1:
