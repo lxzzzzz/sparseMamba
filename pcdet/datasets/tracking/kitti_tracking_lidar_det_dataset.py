@@ -2,8 +2,9 @@ import copy
 import pickle
 
 import numpy as np
+from skimage import io
 
-from ...utils import common_utils
+from ...utils import calibration_kitti, common_utils
 from ..dataset import DatasetTemplate
 
 
@@ -60,16 +61,54 @@ class KittiTrackingLidarDetDataset(DatasetTemplate):
         assert lidar_path.exists(), f'Missing lidar file: {lidar_path}'
         return np.fromfile(str(lidar_path), dtype=np.float32).reshape(-1, info['point_cloud'].get('num_features', 4))
 
+    def get_image(self, info):
+        image_path = self.root_path / info['image']['image_path']
+        assert image_path.exists(), f'Missing image file: {image_path}'
+        image = io.imread(image_path).astype(np.float32)
+        return image / 255.0
+
+    def get_calib(self, info):
+        calib_dict = info['calib']
+        return calibration_kitti.Calibration(calib_dict)
+
     def __getitem__(self, index):
         if self._merge_all_iters_to_one_epoch:
             index = index % len(self.det_infos)
 
         info = copy.deepcopy(self.det_infos[index])
         points = self.get_lidar(info)
+        get_item_list = self.dataset_cfg.get('GET_ITEM_LIST', ['points'])
         input_dict = {
             'frame_id': f"{info.get('sequence_id', 'seq')}_{info.get('frame_id', index)}",
             'points': points,
         }
+
+        if 'sequence_id' in info:
+            input_dict['sequence_id'] = str(info['sequence_id'])
+        if 'frame_idx' in info:
+            input_dict['frame_idx'] = np.int32(info['frame_idx'])
+
+        if 'images' in get_item_list or 'calib_matrices' in get_item_list or 'calib_matricies' in get_item_list:
+            calib = self.get_calib(info)
+            input_dict['calib'] = calib
+
+            if 'images' in get_item_list:
+                input_dict['images'] = self.get_image(info)
+                input_dict['image_shape'] = np.array(info['image']['image_shape'], dtype=np.int32)
+
+            if 'calib_matrices' in get_item_list or 'calib_matricies' in get_item_list:
+                p2 = np.eye(4, dtype=np.float32)
+                p2[:3, :4] = calib.P2
+
+                r0 = np.eye(4, dtype=np.float32)
+                r0[:3, :3] = calib.R0
+
+                v2c = np.eye(4, dtype=np.float32)
+                v2c[:3, :4] = calib.V2C
+
+                input_dict['trans_lidar_to_img'] = p2 @ r0 @ v2c
+                input_dict['trans_lidar_to_cam'] = v2c
+                input_dict['trans_cam_to_img'] = p2
 
         if 'annos' in info:
             annos = common_utils.drop_info_with_name(copy.deepcopy(info['annos']), name='DontCare')
@@ -79,7 +118,6 @@ class KittiTrackingLidarDetDataset(DatasetTemplate):
                 'gt_boxes': np.asarray(annos['gt_boxes_lidar'], dtype=np.float32).reshape(-1, 7),
             })
 
-            get_item_list = self.dataset_cfg.get('GET_ITEM_LIST', ['points'])
             if 'bbox' in annos and 'gt_boxes2d' in get_item_list:
                 input_dict['gt_boxes2d'] = annos['bbox']
 
