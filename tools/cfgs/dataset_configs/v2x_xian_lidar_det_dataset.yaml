@@ -7,6 +7,8 @@ MAP_CLASS_TO_KITTI: {
     'Car': 'Car'
 }
 
+DEFAULT_CLASS_NAME: 'Car'
+
 DATA_SPLIT: {
     'train': train,
     'test': val

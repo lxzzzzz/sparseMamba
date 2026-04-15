@@ -22,6 +22,16 @@ class KittiTrackingLidarDetDataset(DatasetTemplate):
         self.include_data(self.mode)
         default_map = {name: name for name in class_names}
         self.map_class_to_kitti = self.dataset_cfg.get('MAP_CLASS_TO_KITTI', default_map)
+        self.class_name_remap = self.dataset_cfg.get('CLASS_NAME_REMAP', {})
+        self.default_class_name = self.dataset_cfg.get('DEFAULT_CLASS_NAME', None)
+
+    def _remap_names(self, names):
+        if len(names) == 0:
+            return names
+        return np.asarray([
+            self.class_name_remap.get(name, self.default_class_name if self.default_class_name is not None else name)
+            for name in names
+        ])
 
     def include_data(self, mode):
         if self.logger is not None:
@@ -63,6 +73,7 @@ class KittiTrackingLidarDetDataset(DatasetTemplate):
 
         if 'annos' in info:
             annos = common_utils.drop_info_with_name(copy.deepcopy(info['annos']), name='DontCare')
+            annos['name'] = self._remap_names(annos['name'])
             input_dict.update({
                 'gt_names': annos['name'],
                 'gt_boxes': np.asarray(annos['gt_boxes_lidar'], dtype=np.float32).reshape(-1, 7),
@@ -84,6 +95,8 @@ class KittiTrackingLidarDetDataset(DatasetTemplate):
 
         eval_det_annos = copy.deepcopy(det_annos)
         eval_gt_annos = [copy.deepcopy(info['annos']) for info in self.det_infos]
+        for anno in eval_gt_annos:
+            anno['name'] = self._remap_names(anno['name'])
 
         kitti_utils.transform_annotations_to_kitti_format(eval_det_annos, map_name_to_kitti=self.map_class_to_kitti)
         kitti_utils.transform_annotations_to_kitti_format(eval_gt_annos, map_name_to_kitti=self.map_class_to_kitti)

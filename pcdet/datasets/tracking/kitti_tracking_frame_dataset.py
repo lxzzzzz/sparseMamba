@@ -22,6 +22,16 @@ class KittiTrackingFrameDataset(DatasetTemplate):
         self.split = self.dataset_cfg.DATA_SPLIT[self.mode]
         self.tracking_infos = []
         self.include_tracking_data(self.mode)
+        self.class_name_remap = self.dataset_cfg.get('CLASS_NAME_REMAP', {})
+        self.default_class_name = self.dataset_cfg.get('DEFAULT_CLASS_NAME', None)
+
+    def _remap_names(self, names):
+        if len(names) == 0:
+            return names
+        return np.asarray([
+            self.class_name_remap.get(name, self.default_class_name if self.default_class_name is not None else name)
+            for name in names
+        ])
 
     def include_tracking_data(self, mode):
         if self.logger is not None:
@@ -87,6 +97,7 @@ class KittiTrackingFrameDataset(DatasetTemplate):
         if 'annos' in info:
             annos = copy.deepcopy(info['annos'])
             annos = common_utils.drop_info_with_name(annos, name='DontCare')
+            annos['name'] = self._remap_names(annos['name'])
             if len(annos['name']) > 0:
                 gt_boxes_camera = np.concatenate(
                     [annos['location'], annos['dimensions'], annos['rotation_y'][..., np.newaxis]], axis=1
