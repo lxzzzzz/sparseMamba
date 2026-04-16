@@ -96,7 +96,7 @@ python tools/generate_tracking_cache.py \
 ## 6. 做 AB3DMOT 跟踪评测
 
 ```bash
-python tools/eval_ab3dmot_baseline.py \
+python tools/eval_ab3dmot_baseline_v2x_xian.py \
   --cache_dir cache/v2x_xian/fusion_val \
   --gt_pkl data/v2x_xian/tracking_infos_val.pkl \
   --data_cfg tools/cfgs/dataset_configs/v2x_xian_tracking_frame_dataset.yaml \
@@ -107,8 +107,9 @@ python tools/eval_ab3dmot_baseline.py \
 
 说明：
 
-- `--dataset_preset v2x_xian_2hz` 会只对 `V2X_xian` 评测启用更宽松的 IoU 匹配阈值和更长的轨迹保活
-- 同时启用更稳定的运动预测：速度平滑 + 常速度外推
+- 通用数据集继续使用 `tools/eval_ab3dmot_baseline.py`
+- `V2X_xian` 单独使用 `tools/eval_ab3dmot_baseline_v2x_xian.py`
+- `--dataset_preset v2x_xian_2hz` 会启用更宽松的 IoU 匹配阈值、更长的轨迹保活，以及沿朝向的初始速度先验
 - 其他数据集如果不加这个参数，仍保持原来的默认评测逻辑
 
 ## 7. 做 UDCA 跟踪评测

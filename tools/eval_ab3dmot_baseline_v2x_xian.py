@@ -27,18 +27,18 @@ class TrackState:
     hits: int
     missed: int
     last_box: np.ndarray
+    state_box: np.ndarray
     velocity_xy: np.ndarray
     prev_velocity_xy: np.ndarray
 
 
-class AB3DMOTBaseline:
+class AB3DMOTBaselineV2XXian:
     def __init__(
         self,
         max_age=2,
         min_hits=2,
         match_iou=0.1,
         score_thresh=0.1,
-        center_gate=8.0,
         max_distance=None,
         bev_range=None,
         motion_model='constant_velocity',
@@ -46,12 +46,13 @@ class AB3DMOTBaseline:
         velocity_momentum=0.0,
         accel_gain=0.0,
         max_speed=100.0,
+        init_velocity_mode='zero',
+        init_speed_prior=0.0,
     ):
         self.max_age = int(max_age)
         self.min_hits = int(min_hits)
         self.match_iou = float(match_iou)
         self.score_thresh = float(score_thresh)
-        self.center_gate = float(center_gate)
         self.max_distance = None if max_distance is None else float(max_distance)
         self.bev_range = normalize_bev_range(bev_range)
         self.motion_model = str(motion_model)
@@ -59,6 +60,8 @@ class AB3DMOTBaseline:
         self.velocity_momentum = float(velocity_momentum)
         self.accel_gain = float(accel_gain)
         self.max_speed = float(max_speed)
+        self.init_velocity_mode = str(init_velocity_mode)
+        self.init_speed_prior = float(init_speed_prior)
         self.next_track_id = 1
         self.tracks = []
 
@@ -74,8 +77,8 @@ class AB3DMOTBaseline:
             return np.zeros((0, 7), dtype=np.float32)
         predicted = []
         for track in self.tracks:
-            box = track.last_box.copy()
-            steps_ahead = max(float(track.missed), 1.0) * self.motion_horizon
+            box = track.state_box.copy()
+            steps_ahead = self.motion_horizon
             velocity_xy = self._clip_velocity(track.velocity_xy)
             motion_delta = velocity_xy * steps_ahead
             if self.motion_model == 'const_accel':
@@ -85,14 +88,18 @@ class AB3DMOTBaseline:
             predicted.append(box)
         return np.stack(predicted, axis=0).astype(np.float32)
 
-    def _candidate_mask(self, pred_boxes, pred_labels, det_boxes, det_labels):
-        if pred_boxes.shape[0] == 0 or det_boxes.shape[0] == 0:
-            return np.zeros((pred_boxes.shape[0], det_boxes.shape[0]), dtype=bool)
-        iou = bev_iou_matrix(pred_boxes, det_boxes)
+    def _initial_velocity_from_box(self, det_box):
+        if self.init_velocity_mode != 'heading_prior' or self.init_speed_prior <= 0:
+            return np.zeros((2,), dtype=np.float32)
+        yaw = float(det_box[6])
+        heading_xy = np.asarray([np.cos(yaw), np.sin(yaw)], dtype=np.float32)
+        return self._clip_velocity(heading_xy * self.init_speed_prior)
+
+    def _candidate_mask(self, iou, pred_labels, det_labels):
+        if iou.shape[0] == 0 or iou.shape[1] == 0:
+            return np.zeros_like(iou, dtype=bool)
         same_class = pred_labels[:, None] == det_labels[None, :]
-        center_dist = np.linalg.norm(pred_boxes[:, None, 0:2] - det_boxes[None, :, 0:2], axis=-1)
-        valid = same_class & ((iou >= self.match_iou) | (center_dist <= self.center_gate))
-        return valid
+        return same_class & (iou >= self.match_iou)
 
     def _filter_det_by_distance(self, det_boxes, det_scores, det_labels):
         return filter_boxes_by_spatial_range(
@@ -122,23 +129,18 @@ class AB3DMOTBaseline:
 
         pred_boxes = self._predict_boxes()
         track_labels = np.asarray([track.label for track in self.tracks], dtype=np.int64)
-        valid = self._candidate_mask(pred_boxes, track_labels, det_boxes, det_labels)
         iou = bev_iou_matrix(pred_boxes, det_boxes) if pred_boxes.shape[0] > 0 and det_boxes.shape[0] > 0 else np.zeros(
             (pred_boxes.shape[0], det_boxes.shape[0]), dtype=np.float32
         )
+        valid = self._candidate_mask(iou, track_labels, det_labels)
         matches = hungarian_assign(1.0 - iou, valid)
 
         for track_idx, det_idx in matches:
-            if iou[track_idx, det_idx] < self.match_iou:
-                pred_center = pred_boxes[track_idx, 0:2]
-                det_center = det_boxes[det_idx, 0:2]
-                if np.linalg.norm(pred_center - det_center) > self.center_gate:
-                    continue
-
             track = self.tracks[track_idx]
             prev_box = track.last_box.copy()
             new_box = det_boxes[det_idx].copy()
-            measured_velocity = self._clip_velocity(new_box[0:2] - prev_box[0:2])
+            elapsed_steps = max(float(track.missed) * self.motion_horizon, 1e-3)
+            measured_velocity = self._clip_velocity((new_box[0:2] - prev_box[0:2]) / elapsed_steps)
             prev_velocity_xy = track.velocity_xy.copy()
             smoothed_velocity = (
                 self.velocity_momentum * prev_velocity_xy
@@ -147,11 +149,17 @@ class AB3DMOTBaseline:
             track.prev_velocity_xy = prev_velocity_xy
             track.velocity_xy = self._clip_velocity(smoothed_velocity)
             track.last_box = new_box
+            track.state_box = new_box.copy()
             track.score = float(det_scores[det_idx])
             track.hits += 1
             track.missed = 0
             matched_track_ids.add(track_idx)
             matched_det_ids.add(det_idx)
+
+        for track_idx, track in enumerate(self.tracks):
+            if track_idx in matched_track_ids:
+                continue
+            track.state_box = pred_boxes[track_idx].copy()
 
         survivors = []
         for track in self.tracks:
@@ -162,6 +170,7 @@ class AB3DMOTBaseline:
         for det_idx in range(det_boxes.shape[0]):
             if det_idx in matched_det_ids:
                 continue
+            init_velocity_xy = self._initial_velocity_from_box(det_boxes[det_idx])
             self.tracks.append(
                 TrackState(
                     track_id=self.next_track_id,
@@ -170,8 +179,9 @@ class AB3DMOTBaseline:
                     hits=1,
                     missed=0,
                     last_box=det_boxes[det_idx].copy(),
-                    velocity_xy=np.zeros((2,), dtype=np.float32),
-                    prev_velocity_xy=np.zeros((2,), dtype=np.float32),
+                    state_box=det_boxes[det_idx].copy(),
+                    velocity_xy=init_velocity_xy.copy(),
+                    prev_velocity_xy=init_velocity_xy.copy(),
                 )
             )
             self.next_track_id += 1
@@ -182,7 +192,7 @@ class AB3DMOTBaseline:
                 continue
             outputs.append({
                 'track_id': int(track.track_id),
-                'pred_box': track.last_box.copy(),
+                'pred_box': track.state_box.copy(),
                 'pred_label': int(track.label),
                 'pred_score': float(track.score),
                 'missed': int(track.missed),
@@ -191,21 +201,21 @@ class AB3DMOTBaseline:
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description='AB3DMOT-style baseline on detector cache')
+    parser = argparse.ArgumentParser(description='AB3DMOT-style baseline for V2X-Xian on detector cache')
     parser.add_argument('--cache_dir', type=str, required=True, help='detector cache root')
     parser.add_argument('--gt_pkl', type=str, required=True, help='ground-truth pkl, e.g. tracking_infos_val.pkl')
     parser.add_argument('--data_cfg', type=str, default=None, help='optional data/detector yaml used to resolve default BEV range')
     parser.add_argument(
         '--dataset_preset',
         type=str,
-        default='default',
+        default='v2x_xian_2hz',
         choices=['default', 'v2x_xian_2hz'],
         help='optional dataset-specific eval preset; only applied when explicitly requested',
     )
-    parser.add_argument('--class_names', nargs='+', default=['Car', 'Pedestrian', 'Cyclist'])
+    parser.add_argument('--class_names', nargs='+', default=['Car'])
+    parser.add_argument('--sequence_ids', nargs='+', default=None, help='optional subset of sequence ids to evaluate, e.g. 0002 0003')
     parser.add_argument('--score_thresh', type=float, default=0.1)
     parser.add_argument('--match_iou', type=float, default=0.1)
-    parser.add_argument('--center_gate', type=float, default=8.0)
     parser.add_argument('--max_age', type=int, default=2)
     parser.add_argument('--min_hits', type=int, default=2)
     parser.add_argument('--motion_model', type=str, default='constant_velocity', choices=['constant_velocity', 'const_accel'])
@@ -213,6 +223,19 @@ def parse_args():
     parser.add_argument('--velocity_momentum', type=float, default=0.0, help='EMA momentum for measured velocity updates')
     parser.add_argument('--accel_gain', type=float, default=0.0, help='acceleration gain used only for const_accel motion model')
     parser.add_argument('--max_speed', type=float, default=100.0, help='maximum per-frame XY displacement allowed in motion prediction')
+    parser.add_argument(
+        '--init_velocity_mode',
+        type=str,
+        default='zero',
+        choices=['zero', 'heading_prior'],
+        help='initial velocity for new tracks: zero or a fixed speed prior along the box yaw direction',
+    )
+    parser.add_argument(
+        '--init_speed_prior',
+        type=float,
+        default=0.0,
+        help='speed prior used when --init_velocity_mode heading_prior is enabled',
+    )
     parser.add_argument('--max_distance', type=float, default=100.0, help='evaluate and track targets within XY range only')
     parser.add_argument(
         '--bev_range',
@@ -291,9 +314,7 @@ def apply_dataset_preset(args):
         return args
 
     if args.dataset_preset == 'v2x_xian_2hz':
-        # Tuned from label_val GT motion statistics: constant velocity is notably more stable than acceleration.
         preset_override(args, 'match_iou', 0.01, '--match_iou')
-        preset_override(args, 'center_gate', 20.0, '--center_gate')
         preset_override(args, 'max_age', 4, '--max_age')
         preset_override(args, 'min_hits', 2, '--min_hits')
         preset_override(args, 'motion_model', 'constant_velocity', '--motion_model')
@@ -301,11 +322,84 @@ def apply_dataset_preset(args):
         preset_override(args, 'velocity_momentum', 0.60, '--velocity_momentum')
         preset_override(args, 'accel_gain', 0.0, '--accel_gain')
         preset_override(args, 'max_speed', 30.0, '--max_speed')
+        preset_override(args, 'init_velocity_mode', 'heading_prior', '--init_velocity_mode')
+        preset_override(args, 'init_speed_prior', 10.0, '--init_speed_prior')
         if not cli_has_flag('--score_thresh') and float(args.score_thresh) < 0.1:
             args.score_thresh = 0.1
         return args
 
     raise ValueError(f'Unsupported dataset_preset: {args.dataset_preset}')
+
+
+def finalize_metric_dict(metric_dict, *, total_frames=None, num_sequences=None, max_distance=None, bev_range=None, fps=None):
+    metric_dict = dict(metric_dict)
+    if fps is not None:
+        metric_dict['fps'] = float(fps)
+        metric_dict['FPS'] = float(fps)
+    if total_frames is not None:
+        metric_dict['num_frames'] = int(total_frames)
+    if num_sequences is not None:
+        metric_dict['num_sequences'] = int(num_sequences)
+    if max_distance is not None or max_distance is None:
+        metric_dict['max_distance'] = None if max_distance is None else float(max_distance)
+    if bev_range is not None or bev_range is None:
+        metric_dict['bev_range'] = None if bev_range is None else [float(v) for v in bev_range.tolist()]
+    metric_dict['MOTA'] = metric_dict.get('mota', 0.0)
+    metric_dict['MOTP'] = metric_dict.get('motp', 0.0)
+    metric_dict['Rcll'] = metric_dict.get('recall', 0.0)
+    metric_dict['Prcn'] = metric_dict.get('precision', 0.0)
+    metric_dict['MT'] = metric_dict.get('mostly_tracked', 0)
+    metric_dict['PT'] = metric_dict.get('partially_tracked', 0)
+    metric_dict['ML'] = metric_dict.get('mostly_lost', 0)
+    metric_dict['FP'] = metric_dict.get('fp', 0)
+    metric_dict['FN'] = metric_dict.get('fn', 0)
+    metric_dict['IDsw'] = metric_dict.get('id_switches', 0)
+    metric_dict['Frag'] = metric_dict.get('fragments', 0)
+    metric_dict['TP'] = metric_dict.get('tp', 0)
+    metric_dict['IDF1'] = metric_dict.get('idf1', 0.0)
+    metric_dict['IDP'] = metric_dict.get('id_precision', 0.0)
+    metric_dict['IDR'] = metric_dict.get('id_recall', 0.0)
+    metric_dict['HOTA'] = metric_dict.get('hota', 0.0)
+    metric_dict['DetA'] = metric_dict.get('deta', 0.0)
+    metric_dict['AssA'] = metric_dict.get('assa', 0.0)
+    metric_dict['DetPr'] = metric_dict.get('detpr', 0.0)
+    metric_dict['DetRe'] = metric_dict.get('detre', 0.0)
+    metric_dict['AssPr'] = metric_dict.get('asspr', 0.0)
+    metric_dict['AssRe'] = metric_dict.get('assre', 0.0)
+    return metric_dict
+
+
+def print_metric_block(title, metric_dict):
+    print(
+        f'{title} | '
+        f"MOTA={metric_dict.get('mota', 0.0):.4f} "
+        f"MOTP={metric_dict.get('motp', 0.0):.4f} "
+        f"Rcll={metric_dict.get('recall', 0.0):.4f} "
+        f"Prcn={metric_dict.get('precision', 0.0):.4f} "
+        f"MT={metric_dict.get('mostly_tracked', 0)} "
+        f"ML={metric_dict.get('mostly_lost', 0)} "
+        f"FP={metric_dict.get('fp', 0)} "
+        f"FN={metric_dict.get('fn', 0)} "
+        f"IDsw={metric_dict.get('id_switches', 0)} "
+        f"Frag={metric_dict.get('fragments', 0)}"
+    )
+    print(
+        f'{title} Extended | '
+        f"HOTA={metric_dict.get('hota', 0.0):.4f} "
+        f"DetA={metric_dict.get('deta', 0.0):.4f} "
+        f"AssA={metric_dict.get('assa', 0.0):.4f} "
+        f"IDF1={metric_dict.get('idf1', 0.0):.4f} "
+        f"IDP={metric_dict.get('id_precision', 0.0):.4f} "
+        f"IDR={metric_dict.get('id_recall', 0.0):.4f} "
+        f"DetPr={metric_dict.get('detpr', 0.0):.4f} "
+        f"DetRe={metric_dict.get('detre', 0.0):.4f} "
+        f"AssPr={metric_dict.get('asspr', 0.0):.4f} "
+        f"AssRe={metric_dict.get('assre', 0.0):.4f} "
+        f"TP={metric_dict.get('tp', 0)} "
+        f"PT={metric_dict.get('partially_tracked', 0)} "
+        f"Seq={metric_dict.get('num_sequences', 0)} "
+        f"Frames={metric_dict.get('num_frames', 0)}"
+    )
 
 
 def main():
@@ -322,12 +416,19 @@ def main():
     for info in frame_infos:
         sequence_to_infos[str(info['sequence_id'])].append(info)
 
-    tracker = AB3DMOTBaseline(
+    selected_sequence_ids = None
+    if args.sequence_ids is not None:
+        selected_sequence_ids = [str(seq_id) for seq_id in args.sequence_ids]
+        missing = [seq_id for seq_id in selected_sequence_ids if seq_id not in sequence_to_infos]
+        if missing:
+            raise KeyError(f'Requested sequence_ids not found in gt_pkl: {missing}')
+        sequence_to_infos = {seq_id: sequence_to_infos[seq_id] for seq_id in selected_sequence_ids}
+
+    tracker = AB3DMOTBaselineV2XXian(
         max_age=args.max_age,
         min_hits=args.min_hits,
         match_iou=args.match_iou,
         score_thresh=args.score_thresh,
-        center_gate=args.center_gate,
         max_distance=effective_max_distance,
         bev_range=effective_bev_range,
         motion_model=args.motion_model,
@@ -335,8 +436,11 @@ def main():
         velocity_momentum=args.velocity_momentum,
         accel_gain=args.accel_gain,
         max_speed=args.max_speed,
+        init_velocity_mode=args.init_velocity_mode,
+        init_speed_prior=args.init_speed_prior,
     )
     metrics = TrackingMetrics(iou_threshold=args.match_iou)
+    seq_metric_dicts = {}
     results = {}
     total_frames = 0
     start_time = time.perf_counter()
@@ -344,6 +448,7 @@ def main():
     for sequence_id, infos in sequence_to_infos.items():
         tracker.next_track_id = 1
         tracker.tracks = []
+        seq_metrics = TrackingMetrics(iou_threshold=args.match_iou)
         seq_results = []
 
         for info in infos:
@@ -369,92 +474,61 @@ def main():
             pred_boxes, pred_ids, pred_labels = filter_boxes_by_spatial_range(
                 pred_boxes, pred_ids, pred_labels, max_distance=effective_max_distance, bev_range=effective_bev_range
             )
-            metrics.update(sequence_id, gt_boxes, gt_ids, gt_labels, pred_boxes, pred_ids, pred_labels)
+            seq_metrics.update(
+                sequence_id, gt_boxes, gt_ids, gt_labels, pred_boxes, pred_ids, pred_labels, frame_idx=info['frame_idx']
+            )
+            metrics.update(
+                sequence_id, gt_boxes, gt_ids, gt_labels, pred_boxes, pred_ids, pred_labels, frame_idx=info['frame_idx']
+            )
 
         results[sequence_id] = seq_results
+        seq_metric_dicts[sequence_id] = finalize_metric_dict(
+            seq_metrics.summary(),
+            total_frames=len(infos),
+            num_sequences=1,
+            max_distance=effective_max_distance,
+            bev_range=effective_bev_range,
+        )
 
-    metric_dict = metrics.summary()
+    metric_dict = finalize_metric_dict(
+        metrics.summary(),
+        total_frames=total_frames,
+        num_sequences=len(sequence_to_infos),
+        max_distance=effective_max_distance,
+        bev_range=effective_bev_range,
+    )
     elapsed = max(time.perf_counter() - start_time, 1e-6)
     metric_dict['fps'] = float(total_frames / elapsed)
-    metric_dict['max_distance'] = None if effective_max_distance is None else float(effective_max_distance)
-    metric_dict['bev_range'] = None if effective_bev_range is None else [float(v) for v in effective_bev_range.tolist()]
-    metric_dict['num_frames'] = int(total_frames)
-    metric_dict['num_sequences'] = int(len(sequence_to_infos))
-    metric_dict['MOTA'] = metric_dict.get('mota', 0.0)
-    metric_dict['MOTP'] = metric_dict.get('motp', 0.0)
-    metric_dict['Rcll'] = metric_dict.get('recall', 0.0)
-    metric_dict['Prcn'] = metric_dict.get('precision', 0.0)
-    metric_dict['MT'] = metric_dict.get('mostly_tracked', 0)
-    metric_dict['PT'] = metric_dict.get('partially_tracked', 0)
-    metric_dict['ML'] = metric_dict.get('mostly_lost', 0)
-    metric_dict['FP'] = metric_dict.get('fp', 0)
-    metric_dict['FN'] = metric_dict.get('fn', 0)
-    metric_dict['IDsw'] = metric_dict.get('id_switches', 0)
-    metric_dict['Frag'] = metric_dict.get('fragments', 0)
-    metric_dict['TP'] = metric_dict.get('tp', 0)
-    metric_dict['IDF1'] = metric_dict.get('idf1', 0.0)
-    metric_dict['IDP'] = metric_dict.get('id_precision', 0.0)
-    metric_dict['IDR'] = metric_dict.get('id_recall', 0.0)
-    metric_dict['HOTA'] = metric_dict.get('hota', 0.0)
-    metric_dict['DetA'] = metric_dict.get('deta', 0.0)
-    metric_dict['AssA'] = metric_dict.get('assa', 0.0)
-    metric_dict['DetPr'] = metric_dict.get('detpr', 0.0)
-    metric_dict['DetRe'] = metric_dict.get('detre', 0.0)
-    metric_dict['AssPr'] = metric_dict.get('asspr', 0.0)
-    metric_dict['AssRe'] = metric_dict.get('assre', 0.0)
-    metric_dict['FPS'] = metric_dict.get('fps', 0.0)
+    metric_dict['FPS'] = metric_dict['fps']
     with open(save_dir / 'ab3dmot_baseline_metrics.json', 'w') as f:
         json.dump(metric_dict, f, indent=2)
+    with open(save_dir / 'ab3dmot_baseline_sequence_metrics.json', 'w') as f:
+        json.dump(seq_metric_dicts, f, indent=2)
     with open(save_dir / 'ab3dmot_baseline_results.pkl', 'wb') as f:
         pickle.dump(results, f)
 
-    print('================ AB3DMOT-Style Baseline ================')
+    print('================ AB3DMOT-Style Baseline (V2X-Xian) ================')
     print(f'cache_dir: {cache_dir}')
     print(f'gt_pkl: {args.gt_pkl}')
     print(f'dataset_preset: {args.dataset_preset}')
+    print(f"sequence_ids: {selected_sequence_ids if selected_sequence_ids is not None else 'ALL'}")
     print(f'score_thresh: {args.score_thresh}')
     print(f'match_iou: {args.match_iou}')
-    print(f'center_gate: {args.center_gate}')
     print(f'motion_model: {args.motion_model}')
     print(f'motion_horizon: {args.motion_horizon}')
     print(f'velocity_momentum: {args.velocity_momentum}')
     print(f'accel_gain: {args.accel_gain}')
     print(f'max_speed: {args.max_speed}')
+    print(f'init_velocity_mode: {args.init_velocity_mode}')
+    print(f'init_speed_prior: {args.init_speed_prior}')
     print(f'max_age: {args.max_age}')
     print(f'min_hits: {args.min_hits}')
     print(f'max_distance: {args.max_distance}')
     print(f'bev_range: {None if args.bev_range is None else [float(v) for v in normalize_bev_range(args.bev_range).tolist()]}')
-    print(
-        'Summary | '
-        f"MOTA={metric_dict.get('mota', 0.0):.4f} "
-        f"MOTP={metric_dict.get('motp', 0.0):.4f} "
-        f"Rcll={metric_dict.get('recall', 0.0):.4f} "
-        f"Prcn={metric_dict.get('precision', 0.0):.4f} "
-        f"MT={metric_dict.get('mostly_tracked', 0)} "
-        f"ML={metric_dict.get('mostly_lost', 0)} "
-        f"FP={metric_dict.get('fp', 0)} "
-        f"FN={metric_dict.get('fn', 0)} "
-        f"IDsw={metric_dict.get('id_switches', 0)} "
-        f"Frag={metric_dict.get('fragments', 0)} "
-        f"FPS={metric_dict.get('fps', 0.0):.2f}"
-    )
-    print(
-        'Extended | '
-        f"HOTA={metric_dict.get('hota', 0.0):.4f} "
-        f"DetA={metric_dict.get('deta', 0.0):.4f} "
-        f"AssA={metric_dict.get('assa', 0.0):.4f} "
-        f"IDF1={metric_dict.get('idf1', 0.0):.4f} "
-        f"IDP={metric_dict.get('id_precision', 0.0):.4f} "
-        f"IDR={metric_dict.get('id_recall', 0.0):.4f} "
-        f"DetPr={metric_dict.get('detpr', 0.0):.4f} "
-        f"DetRe={metric_dict.get('detre', 0.0):.4f} "
-        f"AssPr={metric_dict.get('asspr', 0.0):.4f} "
-        f"AssRe={metric_dict.get('assre', 0.0):.4f} "
-        f"TP={metric_dict.get('tp', 0)} "
-        f"PT={metric_dict.get('partially_tracked', 0)} "
-        f"Seq={metric_dict.get('num_sequences', 0)} "
-        f"Frames={metric_dict.get('num_frames', 0)}"
-    )
+    for sequence_id, seq_metric_dict in seq_metric_dicts.items():
+        print_metric_block(f'Seq {sequence_id}', seq_metric_dict)
+    print_metric_block('Total', metric_dict)
+    print(f"Total FPS={metric_dict.get('fps', 0.0):.2f}")
 
 
 if __name__ == '__main__':
