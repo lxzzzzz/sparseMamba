@@ -48,6 +48,7 @@ class AB3DMOTBaselineV2XXian:
         max_speed=100.0,
         init_velocity_mode='zero',
         init_speed_prior=0.0,
+        dt_hypotheses=None,
     ):
         self.max_age = int(max_age)
         self.min_hits = int(min_hits)
@@ -62,8 +63,29 @@ class AB3DMOTBaselineV2XXian:
         self.max_speed = float(max_speed)
         self.init_velocity_mode = str(init_velocity_mode)
         self.init_speed_prior = float(init_speed_prior)
+        self.dt_hypotheses = self._normalize_dt_hypotheses(dt_hypotheses)
         self.next_track_id = 1
         self.tracks = []
+
+    @staticmethod
+    def _normalize_dt_hypotheses(dt_hypotheses):
+        if dt_hypotheses is None:
+            dt_hypotheses = [1.0]
+        normalized = []
+        for dt in dt_hypotheses:
+            dt = float(dt)
+            if dt <= 0:
+                continue
+            if not any(abs(dt - existing) < 1e-6 for existing in normalized):
+                normalized.append(dt)
+        if not normalized:
+            normalized = [1.0]
+        normalized.sort()
+        if not any(abs(1.0 - existing) < 1e-6 for existing in normalized):
+            normalized.insert(0, 1.0)
+        else:
+            normalized.sort(key=lambda value: (abs(value - 1.0) > 1e-6, value))
+        return normalized
 
     def _clip_velocity(self, velocity_xy):
         velocity_xy = np.asarray(velocity_xy, dtype=np.float32)
@@ -72,13 +94,19 @@ class AB3DMOTBaselineV2XXian:
             return velocity_xy
         return velocity_xy * (self.max_speed / speed)
 
-    def _predict_boxes(self):
+    def _predict_boxes(self, dt_scale=1.0, track_indices=None):
         if len(self.tracks) == 0:
             return np.zeros((0, 7), dtype=np.float32)
+        if track_indices is None:
+            tracks = self.tracks
+        else:
+            tracks = [self.tracks[int(idx)] for idx in np.asarray(track_indices, dtype=np.int64).tolist()]
+        if len(tracks) == 0:
+            return np.zeros((0, 7), dtype=np.float32)
         predicted = []
-        for track in self.tracks:
+        for track in tracks:
             box = track.state_box.copy()
-            steps_ahead = self.motion_horizon
+            steps_ahead = self.motion_horizon * float(dt_scale)
             velocity_xy = self._clip_velocity(track.velocity_xy)
             motion_delta = velocity_xy * steps_ahead
             if self.motion_model == 'const_accel':
@@ -127,39 +155,55 @@ class AB3DMOTBaselineV2XXian:
         matched_track_ids = set()
         matched_det_ids = set()
 
-        pred_boxes = self._predict_boxes()
+        base_pred_boxes = self._predict_boxes(dt_scale=1.0)
         track_labels = np.asarray([track.label for track in self.tracks], dtype=np.int64)
-        iou = bev_iou_matrix(pred_boxes, det_boxes) if pred_boxes.shape[0] > 0 and det_boxes.shape[0] > 0 else np.zeros(
-            (pred_boxes.shape[0], det_boxes.shape[0]), dtype=np.float32
-        )
-        valid = self._candidate_mask(iou, track_labels, det_labels)
-        matches = hungarian_assign(1.0 - iou, valid)
-
-        for track_idx, det_idx in matches:
-            track = self.tracks[track_idx]
-            prev_box = track.last_box.copy()
-            new_box = det_boxes[det_idx].copy()
-            elapsed_steps = max(float(track.missed) * self.motion_horizon, 1e-3)
-            measured_velocity = self._clip_velocity((new_box[0:2] - prev_box[0:2]) / elapsed_steps)
-            prev_velocity_xy = track.velocity_xy.copy()
-            smoothed_velocity = (
-                self.velocity_momentum * prev_velocity_xy
-                + (1.0 - self.velocity_momentum) * measured_velocity
+        for dt_scale in self.dt_hypotheses:
+            remaining_track_indices = np.asarray(
+                [idx for idx in range(len(self.tracks)) if idx not in matched_track_ids], dtype=np.int64
             )
-            track.prev_velocity_xy = prev_velocity_xy
-            track.velocity_xy = self._clip_velocity(smoothed_velocity)
-            track.last_box = new_box
-            track.state_box = new_box.copy()
-            track.score = float(det_scores[det_idx])
-            track.hits += 1
-            track.missed = 0
-            matched_track_ids.add(track_idx)
-            matched_det_ids.add(det_idx)
+            remaining_det_indices = np.asarray(
+                [idx for idx in range(det_boxes.shape[0]) if idx not in matched_det_ids], dtype=np.int64
+            )
+            if remaining_track_indices.size == 0 or remaining_det_indices.size == 0:
+                break
+
+            stage_pred_boxes = self._predict_boxes(dt_scale=dt_scale, track_indices=remaining_track_indices)
+            stage_track_labels = track_labels[remaining_track_indices]
+            stage_det_boxes = det_boxes[remaining_det_indices]
+            stage_det_labels = det_labels[remaining_det_indices]
+            stage_iou = bev_iou_matrix(stage_pred_boxes, stage_det_boxes) if stage_pred_boxes.shape[0] > 0 else np.zeros(
+                (stage_pred_boxes.shape[0], stage_det_boxes.shape[0]), dtype=np.float32
+            )
+            stage_valid = self._candidate_mask(stage_iou, stage_track_labels, stage_det_labels)
+            stage_matches = hungarian_assign(1.0 - stage_iou, stage_valid)
+
+            for local_track_idx, local_det_idx in stage_matches:
+                track_idx = int(remaining_track_indices[local_track_idx])
+                det_idx = int(remaining_det_indices[local_det_idx])
+                track = self.tracks[track_idx]
+                prev_box = track.last_box.copy()
+                new_box = det_boxes[det_idx].copy()
+                elapsed_steps = max(float(track.missed) * self.motion_horizon * float(dt_scale), 1e-3)
+                measured_velocity = self._clip_velocity((new_box[0:2] - prev_box[0:2]) / elapsed_steps)
+                prev_velocity_xy = track.velocity_xy.copy()
+                smoothed_velocity = (
+                    self.velocity_momentum * prev_velocity_xy
+                    + (1.0 - self.velocity_momentum) * measured_velocity
+                )
+                track.prev_velocity_xy = prev_velocity_xy
+                track.velocity_xy = self._clip_velocity(smoothed_velocity)
+                track.last_box = new_box
+                track.state_box = new_box.copy()
+                track.score = float(det_scores[det_idx])
+                track.hits += 1
+                track.missed = 0
+                matched_track_ids.add(track_idx)
+                matched_det_ids.add(det_idx)
 
         for track_idx, track in enumerate(self.tracks):
             if track_idx in matched_track_ids:
                 continue
-            track.state_box = pred_boxes[track_idx].copy()
+            track.state_box = base_pred_boxes[track_idx].copy()
 
         survivors = []
         for track in self.tracks:
@@ -235,6 +279,13 @@ def parse_args():
         type=float,
         default=0.0,
         help='speed prior used when --init_velocity_mode heading_prior is enabled',
+    )
+    parser.add_argument(
+        '--dt_hypotheses',
+        type=float,
+        nargs='+',
+        default=None,
+        help='sequential dt hypotheses for matching, e.g. 1 1.5 2 2.5',
     )
     parser.add_argument('--max_distance', type=float, default=100.0, help='evaluate and track targets within XY range only')
     parser.add_argument(
@@ -324,6 +375,7 @@ def apply_dataset_preset(args):
         preset_override(args, 'max_speed', 30.0, '--max_speed')
         preset_override(args, 'init_velocity_mode', 'heading_prior', '--init_velocity_mode')
         preset_override(args, 'init_speed_prior', 10.0, '--init_speed_prior')
+        preset_override(args, 'dt_hypotheses', [1.0, 1.5, 2.0, 2.5], '--dt_hypotheses')
         if not cli_has_flag('--score_thresh') and float(args.score_thresh) < 0.1:
             args.score_thresh = 0.1
         return args
@@ -438,6 +490,7 @@ def main():
         max_speed=args.max_speed,
         init_velocity_mode=args.init_velocity_mode,
         init_speed_prior=args.init_speed_prior,
+        dt_hypotheses=args.dt_hypotheses,
     )
     metrics = TrackingMetrics(iou_threshold=args.match_iou)
     seq_metric_dicts = {}
@@ -521,6 +574,7 @@ def main():
     print(f'max_speed: {args.max_speed}')
     print(f'init_velocity_mode: {args.init_velocity_mode}')
     print(f'init_speed_prior: {args.init_speed_prior}')
+    print(f'dt_hypotheses: {tracker.dt_hypotheses}')
     print(f'max_age: {args.max_age}')
     print(f'min_hits: {args.min_hits}')
     print(f'max_distance: {args.max_distance}')
