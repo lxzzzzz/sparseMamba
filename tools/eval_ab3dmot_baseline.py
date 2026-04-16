@@ -46,6 +46,8 @@ class AB3DMOTBaseline:
         velocity_momentum=0.0,
         accel_gain=0.0,
         max_speed=100.0,
+        init_velocity_mode='zero',
+        init_speed_prior=0.0,
     ):
         self.max_age = int(max_age)
         self.min_hits = int(min_hits)
@@ -58,6 +60,8 @@ class AB3DMOTBaseline:
         self.velocity_momentum = float(velocity_momentum)
         self.accel_gain = float(accel_gain)
         self.max_speed = float(max_speed)
+        self.init_velocity_mode = str(init_velocity_mode)
+        self.init_speed_prior = float(init_speed_prior)
         self.next_track_id = 1
         self.tracks = []
 
@@ -83,6 +87,13 @@ class AB3DMOTBaseline:
             box[0:2] += motion_delta
             predicted.append(box)
         return np.stack(predicted, axis=0).astype(np.float32)
+
+    def _initial_velocity_from_box(self, det_box):
+        if self.init_velocity_mode != 'heading_prior' or self.init_speed_prior <= 0:
+            return np.zeros((2,), dtype=np.float32)
+        yaw = float(det_box[6])
+        heading_xy = np.asarray([np.cos(yaw), np.sin(yaw)], dtype=np.float32)
+        return self._clip_velocity(heading_xy * self.init_speed_prior)
 
     def _candidate_mask(self, iou, pred_labels, det_labels):
         if iou.shape[0] == 0 or iou.shape[1] == 0:
@@ -161,6 +172,7 @@ class AB3DMOTBaseline:
         for det_idx in range(det_boxes.shape[0]):
             if det_idx in matched_det_ids:
                 continue
+            init_velocity_xy = self._initial_velocity_from_box(det_boxes[det_idx])
             self.tracks.append(
                 TrackState(
                     track_id=self.next_track_id,
@@ -170,8 +182,8 @@ class AB3DMOTBaseline:
                     missed=0,
                     last_box=det_boxes[det_idx].copy(),
                     state_box=det_boxes[det_idx].copy(),
-                    velocity_xy=np.zeros((2,), dtype=np.float32),
-                    prev_velocity_xy=np.zeros((2,), dtype=np.float32),
+                    velocity_xy=init_velocity_xy.copy(),
+                    prev_velocity_xy=init_velocity_xy.copy(),
                 )
             )
             self.next_track_id += 1
@@ -213,6 +225,19 @@ def parse_args():
     parser.add_argument('--velocity_momentum', type=float, default=0.0, help='EMA momentum for measured velocity updates')
     parser.add_argument('--accel_gain', type=float, default=0.0, help='acceleration gain used only for const_accel motion model')
     parser.add_argument('--max_speed', type=float, default=100.0, help='maximum per-frame XY displacement allowed in motion prediction')
+    parser.add_argument(
+        '--init_velocity_mode',
+        type=str,
+        default='zero',
+        choices=['zero', 'heading_prior'],
+        help='initial velocity for new tracks: zero or a fixed speed prior along the box yaw direction',
+    )
+    parser.add_argument(
+        '--init_speed_prior',
+        type=float,
+        default=0.0,
+        help='speed prior used when --init_velocity_mode heading_prior is enabled',
+    )
     parser.add_argument('--max_distance', type=float, default=100.0, help='evaluate and track targets within XY range only')
     parser.add_argument(
         '--bev_range',
@@ -300,6 +325,11 @@ def apply_dataset_preset(args):
         preset_override(args, 'velocity_momentum', 0.60, '--velocity_momentum')
         preset_override(args, 'accel_gain', 0.0, '--accel_gain')
         preset_override(args, 'max_speed', 30.0, '--max_speed')
+        # label_val Car GT per-frame displacement statistics:
+        # p25=7.83, p50=11.64, mean=11.73. Use a slightly conservative
+        # heading-aligned prior for newborn tracks to reduce immediate ID churn.
+        preset_override(args, 'init_velocity_mode', 'heading_prior', '--init_velocity_mode')
+        preset_override(args, 'init_speed_prior', 10.0, '--init_speed_prior')
         if not cli_has_flag('--score_thresh') and float(args.score_thresh) < 0.1:
             args.score_thresh = 0.1
         return args
@@ -333,6 +363,8 @@ def main():
         velocity_momentum=args.velocity_momentum,
         accel_gain=args.accel_gain,
         max_speed=args.max_speed,
+        init_velocity_mode=args.init_velocity_mode,
+        init_speed_prior=args.init_speed_prior,
     )
     metrics = TrackingMetrics(iou_threshold=args.match_iou)
     results = {}
@@ -419,6 +451,8 @@ def main():
     print(f'velocity_momentum: {args.velocity_momentum}')
     print(f'accel_gain: {args.accel_gain}')
     print(f'max_speed: {args.max_speed}')
+    print(f'init_velocity_mode: {args.init_velocity_mode}')
+    print(f'init_speed_prior: {args.init_speed_prior}')
     print(f'max_age: {args.max_age}')
     print(f'min_hits: {args.min_hits}')
     print(f'max_distance: {args.max_distance}')
