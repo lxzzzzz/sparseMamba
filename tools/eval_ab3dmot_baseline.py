@@ -27,6 +27,7 @@ class TrackState:
     hits: int
     missed: int
     last_box: np.ndarray
+    state_box: np.ndarray
     velocity_xy: np.ndarray
     prev_velocity_xy: np.ndarray
 
@@ -38,7 +39,6 @@ class AB3DMOTBaseline:
         min_hits=2,
         match_iou=0.1,
         score_thresh=0.1,
-        center_gate=8.0,
         max_distance=None,
         bev_range=None,
         motion_model='constant_velocity',
@@ -51,7 +51,6 @@ class AB3DMOTBaseline:
         self.min_hits = int(min_hits)
         self.match_iou = float(match_iou)
         self.score_thresh = float(score_thresh)
-        self.center_gate = float(center_gate)
         self.max_distance = None if max_distance is None else float(max_distance)
         self.bev_range = normalize_bev_range(bev_range)
         self.motion_model = str(motion_model)
@@ -74,8 +73,8 @@ class AB3DMOTBaseline:
             return np.zeros((0, 7), dtype=np.float32)
         predicted = []
         for track in self.tracks:
-            box = track.last_box.copy()
-            steps_ahead = max(float(track.missed), 1.0) * self.motion_horizon
+            box = track.state_box.copy()
+            steps_ahead = self.motion_horizon
             velocity_xy = self._clip_velocity(track.velocity_xy)
             motion_delta = velocity_xy * steps_ahead
             if self.motion_model == 'const_accel':
@@ -85,14 +84,11 @@ class AB3DMOTBaseline:
             predicted.append(box)
         return np.stack(predicted, axis=0).astype(np.float32)
 
-    def _candidate_mask(self, pred_boxes, pred_labels, det_boxes, det_labels):
-        if pred_boxes.shape[0] == 0 or det_boxes.shape[0] == 0:
-            return np.zeros((pred_boxes.shape[0], det_boxes.shape[0]), dtype=bool)
-        iou = bev_iou_matrix(pred_boxes, det_boxes)
+    def _candidate_mask(self, iou, pred_labels, det_labels):
+        if iou.shape[0] == 0 or iou.shape[1] == 0:
+            return np.zeros_like(iou, dtype=bool)
         same_class = pred_labels[:, None] == det_labels[None, :]
-        center_dist = np.linalg.norm(pred_boxes[:, None, 0:2] - det_boxes[None, :, 0:2], axis=-1)
-        valid = same_class & ((iou >= self.match_iou) | (center_dist <= self.center_gate))
-        return valid
+        return same_class & (iou >= self.match_iou)
 
     def _filter_det_by_distance(self, det_boxes, det_scores, det_labels):
         return filter_boxes_by_spatial_range(
@@ -122,23 +118,18 @@ class AB3DMOTBaseline:
 
         pred_boxes = self._predict_boxes()
         track_labels = np.asarray([track.label for track in self.tracks], dtype=np.int64)
-        valid = self._candidate_mask(pred_boxes, track_labels, det_boxes, det_labels)
         iou = bev_iou_matrix(pred_boxes, det_boxes) if pred_boxes.shape[0] > 0 and det_boxes.shape[0] > 0 else np.zeros(
             (pred_boxes.shape[0], det_boxes.shape[0]), dtype=np.float32
         )
+        valid = self._candidate_mask(iou, track_labels, det_labels)
         matches = hungarian_assign(1.0 - iou, valid)
 
         for track_idx, det_idx in matches:
-            if iou[track_idx, det_idx] < self.match_iou:
-                pred_center = pred_boxes[track_idx, 0:2]
-                det_center = det_boxes[det_idx, 0:2]
-                if np.linalg.norm(pred_center - det_center) > self.center_gate:
-                    continue
-
             track = self.tracks[track_idx]
             prev_box = track.last_box.copy()
             new_box = det_boxes[det_idx].copy()
-            measured_velocity = self._clip_velocity(new_box[0:2] - prev_box[0:2])
+            elapsed_steps = max(float(track.missed) * self.motion_horizon, 1e-3)
+            measured_velocity = self._clip_velocity((new_box[0:2] - prev_box[0:2]) / elapsed_steps)
             prev_velocity_xy = track.velocity_xy.copy()
             smoothed_velocity = (
                 self.velocity_momentum * prev_velocity_xy
@@ -147,11 +138,19 @@ class AB3DMOTBaseline:
             track.prev_velocity_xy = prev_velocity_xy
             track.velocity_xy = self._clip_velocity(smoothed_velocity)
             track.last_box = new_box
+            track.state_box = new_box.copy()
             track.score = float(det_scores[det_idx])
             track.hits += 1
             track.missed = 0
             matched_track_ids.add(track_idx)
             matched_det_ids.add(det_idx)
+
+        for track_idx, track in enumerate(self.tracks):
+            if track_idx in matched_track_ids:
+                continue
+            # Keep unmatched confirmed tracks alive at the predicted state instead
+            # of re-emitting the last observed box at a stale location.
+            track.state_box = pred_boxes[track_idx].copy()
 
         survivors = []
         for track in self.tracks:
@@ -170,6 +169,7 @@ class AB3DMOTBaseline:
                     hits=1,
                     missed=0,
                     last_box=det_boxes[det_idx].copy(),
+                    state_box=det_boxes[det_idx].copy(),
                     velocity_xy=np.zeros((2,), dtype=np.float32),
                     prev_velocity_xy=np.zeros((2,), dtype=np.float32),
                 )
@@ -182,7 +182,7 @@ class AB3DMOTBaseline:
                 continue
             outputs.append({
                 'track_id': int(track.track_id),
-                'pred_box': track.last_box.copy(),
+                'pred_box': track.state_box.copy(),
                 'pred_label': int(track.label),
                 'pred_score': float(track.score),
                 'missed': int(track.missed),
@@ -205,7 +205,7 @@ def parse_args():
     parser.add_argument('--class_names', nargs='+', default=['Car', 'Pedestrian', 'Cyclist'])
     parser.add_argument('--score_thresh', type=float, default=0.1)
     parser.add_argument('--match_iou', type=float, default=0.1)
-    parser.add_argument('--center_gate', type=float, default=8.0)
+    parser.add_argument('--center_gate', type=float, default=None, help=argparse.SUPPRESS)
     parser.add_argument('--max_age', type=int, default=2)
     parser.add_argument('--min_hits', type=int, default=2)
     parser.add_argument('--motion_model', type=str, default='constant_velocity', choices=['constant_velocity', 'const_accel'])
@@ -293,7 +293,6 @@ def apply_dataset_preset(args):
     if args.dataset_preset == 'v2x_xian_2hz':
         # Tuned from label_val GT motion statistics: constant velocity is notably more stable than acceleration.
         preset_override(args, 'match_iou', 0.01, '--match_iou')
-        preset_override(args, 'center_gate', 20.0, '--center_gate')
         preset_override(args, 'max_age', 4, '--max_age')
         preset_override(args, 'min_hits', 2, '--min_hits')
         preset_override(args, 'motion_model', 'constant_velocity', '--motion_model')
@@ -327,7 +326,6 @@ def main():
         min_hits=args.min_hits,
         match_iou=args.match_iou,
         score_thresh=args.score_thresh,
-        center_gate=args.center_gate,
         max_distance=effective_max_distance,
         bev_range=effective_bev_range,
         motion_model=args.motion_model,
@@ -369,7 +367,9 @@ def main():
             pred_boxes, pred_ids, pred_labels = filter_boxes_by_spatial_range(
                 pred_boxes, pred_ids, pred_labels, max_distance=effective_max_distance, bev_range=effective_bev_range
             )
-            metrics.update(sequence_id, gt_boxes, gt_ids, gt_labels, pred_boxes, pred_ids, pred_labels)
+            metrics.update(
+                sequence_id, gt_boxes, gt_ids, gt_labels, pred_boxes, pred_ids, pred_labels, frame_idx=info['frame_idx']
+            )
 
         results[sequence_id] = seq_results
 
@@ -414,7 +414,6 @@ def main():
     print(f'dataset_preset: {args.dataset_preset}')
     print(f'score_thresh: {args.score_thresh}')
     print(f'match_iou: {args.match_iou}')
-    print(f'center_gate: {args.center_gate}')
     print(f'motion_model: {args.motion_model}')
     print(f'motion_horizon: {args.motion_horizon}')
     print(f'velocity_momentum: {args.velocity_momentum}')

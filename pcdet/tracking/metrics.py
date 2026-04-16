@@ -13,6 +13,7 @@ class TrackingMetrics:
         self.false_positive = 0
         self.false_negative = 0
         self.id_switches = 0
+        self.id_switch_events = []
         self.matched_iou_sum = 0.0
         self.matched_iou_count = 0
         self._gt_to_pred = {}
@@ -25,7 +26,7 @@ class TrackingMetrics:
             'frag': defaultdict(int),
         })
 
-    def update(self, sequence_id, gt_boxes, gt_ids, gt_labels, pred_boxes, pred_ids, pred_labels):
+    def update(self, sequence_id, gt_boxes, gt_ids, gt_labels, pred_boxes, pred_ids, pred_labels, frame_idx=None):
         sequence_id = str(sequence_id)
         gt_boxes = np.asarray(gt_boxes, dtype=np.float32).reshape(-1, 7)
         gt_ids = np.asarray(gt_ids, dtype=np.int64)
@@ -66,9 +67,16 @@ class TrackingMetrics:
             gt_id = int(gt_ids[gt_idx])
             pred_id = int(pred_ids[pred_idx])
             gt_key = (sequence_id, gt_id)
-            pred_id = int(pred_ids[pred_idx])
-            if gt_key in self._gt_to_pred and self._gt_to_pred[gt_key] != pred_id:
+            prev_pred_id = self._gt_to_pred.get(gt_key, None)
+            if prev_pred_id is not None and prev_pred_id != pred_id:
                 self.id_switches += 1
+                self.id_switch_events.append({
+                    'sequence_id': sequence_id,
+                    'frame_idx': None if frame_idx is None else int(frame_idx),
+                    'gt_id': gt_id,
+                    'prev_pred_id': int(prev_pred_id),
+                    'new_pred_id': pred_id,
+                })
             self._gt_to_pred[gt_key] = pred_id
             seq_stats['pair_counts'][(gt_id, pred_id)] += 1
             seq_stats['gt_matched_counts'][gt_id] += 1
@@ -160,6 +168,7 @@ class TrackingMetrics:
             'fp': int(self.false_positive),
             'fn': int(self.false_negative),
             'id_switches': int(self.id_switches),
+            'id_switch_events': list(self.id_switch_events),
             'precision': float(precision),
             'recall': float(recall),
             'mota': float(mota),

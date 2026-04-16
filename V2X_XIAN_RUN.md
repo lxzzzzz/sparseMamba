@@ -107,8 +107,8 @@ python tools/eval_ab3dmot_baseline.py \
 
 说明：
 
-- `--dataset_preset v2x_xian_2hz` 会只对 `V2X_xian` 评测启用更宽的高速场景门控
-- 同时启用更激进的运动预测：速度平滑 + 常加速度外推
+- `--dataset_preset v2x_xian_2hz` 会只对 `V2X_xian` 评测启用更宽松的 IoU 匹配阈值和更长的轨迹保活
+- 同时启用更稳定的运动预测：速度平滑 + 常速度外推
 - 其他数据集如果不加这个参数，仍保持原来的默认评测逻辑
 
 ## 7. 做 UDCA 跟踪评测
