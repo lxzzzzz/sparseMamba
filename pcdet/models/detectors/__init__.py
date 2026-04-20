@@ -16,6 +16,7 @@ from .voxelnext import VoxelNeXt
 from .transfusion import TransFusion
 from .bevfusion import BevFusion
 from .fusion_voxelnext import FusionVoxelNeXt
+from .selective_moe_voxelnext import SelectiveMoEVoxelNeXt
 
 __all__ = {
     'Detector3DTemplate': Detector3DTemplate,
@@ -37,6 +38,7 @@ __all__ = {
     'TransFusion': TransFusion,
     'BevFusion': BevFusion,
     'FusionVoxelNeXt': FusionVoxelNeXt,
+    'SelectiveMoEVoxelNeXt': SelectiveMoEVoxelNeXt,
 }
 
 

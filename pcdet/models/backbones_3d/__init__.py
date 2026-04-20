@@ -7,6 +7,7 @@ from .spconv_backbone_voxelnext2d import VoxelResBackBone8xVoxelNeXt2D
 from .spconv_unet import UNetV2
 from .dsvt import DSVT
 from .voxelnext_fusion import VoxelNeXtFusion
+from .voxelnext_selective_moe import VoxelNeXtSelectiveMoE
 
 __all__ = {
     'VoxelBackBone8x': VoxelBackBone8x,
@@ -21,4 +22,5 @@ __all__ = {
     'PillarRes18BackBone8x': PillarRes18BackBone8x,
     'DSVT': DSVT,
     'VoxelNeXtFusion': VoxelNeXtFusion,
+    'VoxelNeXtSelectiveMoE': VoxelNeXtSelectiveMoE,
 }
