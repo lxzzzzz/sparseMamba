@@ -8,6 +8,12 @@ from .spconv_unet import UNetV2
 from .dsvt import DSVT
 from .voxelnext_fusion import VoxelNeXtFusion
 from .voxelnext_selective_moe import VoxelNeXtSelectiveMoE
+from .voxelnext_ablation import (
+    VoxelNeXtDirectFusion,
+    VoxelNeXtDeformFusion,
+    VoxelNeXtRuleRouteMoE,
+    VoxelNeXtAllSampleMoE,
+)
 
 __all__ = {
     'VoxelBackBone8x': VoxelBackBone8x,
@@ -23,4 +29,8 @@ __all__ = {
     'DSVT': DSVT,
     'VoxelNeXtFusion': VoxelNeXtFusion,
     'VoxelNeXtSelectiveMoE': VoxelNeXtSelectiveMoE,
+    'VoxelNeXtDirectFusion': VoxelNeXtDirectFusion,
+    'VoxelNeXtDeformFusion': VoxelNeXtDeformFusion,
+    'VoxelNeXtRuleRouteMoE': VoxelNeXtRuleRouteMoE,
+    'VoxelNeXtAllSampleMoE': VoxelNeXtAllSampleMoE,
 }
