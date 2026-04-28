@@ -8,7 +8,28 @@ from pathlib import Path
 
 
 def parse_float_list(text):
-    parts = str(text).replace(",", " ").split()
+    text = str(text).strip()
+    if not text:
+        raise ValueError("empty float list")
+
+    if ":" in text:
+        parts = text.split(":")
+        if len(parts) != 3:
+            raise ValueError(f"range form must be start:step:end, got: {text}")
+        start, step, end = [float(item) for item in parts]
+        if step <= 0:
+            raise ValueError(f"step must be positive, got: {step}")
+        values = []
+        cur = start
+        eps = abs(step) * 1e-6 + 1e-9
+        while cur <= end + eps:
+            values.append(round(cur, 10))
+            cur += step
+        if len(values) == 0:
+            raise ValueError(f"invalid range specification: {text}")
+        return values
+
+    parts = text.replace(",", " ").split()
     values = [float(item) for item in parts]
     if len(values) == 0:
         raise ValueError("empty float list")
@@ -177,8 +198,8 @@ def parse_args():
     parser.add_argument("--rescue_min_visual_conf", type=float, default=0.35)
     parser.add_argument("--disable_stage2", action="store_true")
     parser.add_argument("--disable_stage3", action="store_true")
-    parser.add_argument("--u3d_values", type=str, default="0.45,0.55,0.65,0.75")
-    parser.add_argument("--u2d_values", type=str, default="0.45,0.55,0.65,0.75")
+    parser.add_argument("--u3d_values", type=str, default="0.15:0.05:0.75")
+    parser.add_argument("--u2d_values", type=str, default="0.15:0.05:0.75")
     parser.add_argument("--metric", type=str, default="mota")
     parser.add_argument("--skip_existing", action="store_true")
     return parser.parse_args()
@@ -188,6 +209,11 @@ def main():
     args = parse_args()
     u3d_values = parse_float_list(args.u3d_values)
     u2d_values = parse_float_list(args.u2d_values)
+    print(
+        f"u3d grid: {u3d_values}\n"
+        f"u2d grid: {u2d_values}\n"
+        f"total runs: {len(u3d_values) * len(u2d_values)}"
+    )
     save_root = Path(args.save_root)
     runs_dir = save_root / "runs"
     runs_dir.mkdir(parents=True, exist_ok=True)
