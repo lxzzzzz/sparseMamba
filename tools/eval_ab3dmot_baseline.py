@@ -423,7 +423,7 @@ def main():
     print(f'max_age: {args.max_age}')
     print(f'min_hits: {args.min_hits}')
     print(f'max_distance: {args.max_distance}')
-    print(f'bev_range: {None if args.bev_range is None else [float(v) for v in normalize_bev_range(args.bev_range).tolist()]}')
+    print(f'bev_range: {None if effective_bev_range is None else [float(v) for v in effective_bev_range.tolist()]}')
     print(
         'Summary | '
         f"MOTA={metric_dict.get('mota', 0.0):.4f} "
